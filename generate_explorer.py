@@ -112,7 +112,7 @@ def generate_html(data, image_name="uploaded image"):
   .stats {{ font-size: 0.85em; color: #58a6ff; text-align: center; margin-top: 8px; }}
 
   .side-by-side {{
-    max-width: 1200px; margin: 0 auto 16px; display: flex; gap: 12px; justify-content: center;
+    max-width: 1600px; margin: 0 auto 16px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
   }}
   .panel {{ text-align: center; }}
   .panel h2 {{ font-size: 0.85em; color: #8b949e; margin-bottom: 6px; }}
@@ -206,6 +206,10 @@ def generate_html(data, image_name="uploaded image"):
     <h2>Original image</h2>
     <canvas id="origCanvas" width="{canvas_w}" height="{canvas_h}"></canvas>
   </div>
+  <div class="panel">
+    <h2>Modified <span id="modCount" style="color:#ffa657;font-size:0.8em;"></span></h2>
+    <canvas id="modCanvas" width="{canvas_w}" height="{canvas_h}"></canvas>
+  </div>
 </div>
 
 <div class="workflow-panel">
@@ -253,6 +257,9 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const origCanvas = document.getElementById('origCanvas');
 const origCtx = origCanvas.getContext('2d');
+const modCanvas = document.getElementById('modCanvas');
+const modCtx = modCanvas.getContext('2d');
+let _modCount = 0;
 const scaleX = {canvas_w} / DATA.width;
 const scaleY = {canvas_h} / DATA.height;
 
@@ -340,6 +347,8 @@ origImg.onload = function() {{
   origLoaded = true;
   // Draw scaled version
   origCtx.drawImage(origImg, 0, 0, {canvas_w}, {canvas_h});
+  // Initialize modified canvas with original image
+  modCtx.drawImage(origImg, 0, 0, {canvas_w}, {canvas_h});
   // Draw full-size for cropping
   fullCtx.drawImage(origImg, 0, 0, DATA.width, DATA.height);
   draw();
@@ -537,6 +546,8 @@ function generateCrops(groups) {{
       }};
     }})(cropData, cropW, cropH, g.id));
 
+    item._group = g;
+
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.className = 'crop-checkbox';
@@ -706,7 +717,9 @@ async function sendBatchToComfyUI() {{
     }});
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
-    statusEl.textContent = 'Batch sent \u2713 (' + items.length + ' images, id: ' + data.prompt_id.slice(0,8) + '\u2026)';
+    const groups = items.map(it => it._group).filter(Boolean);
+    compositeResultsOnCanvas(data.images || [], groups);
+    statusEl.textContent = 'Batch done \u2713 (' + (data.images || []).length + ' results, id: ' + data.prompt_id.slice(0,8) + '\u2026)';
     statusEl.style.color = '#3fb950';
   }} catch(e) {{
     statusEl.textContent = 'Batch error: ' + e.message;
@@ -720,6 +733,29 @@ async function removeAllBg() {{
     btn.click();
     await new Promise(r => setTimeout(r, 800));
   }}
+}}
+
+function compositeResultsOnCanvas(images, groups) {{
+  if (!images || images.length === 0) return;
+  let loaded = 0;
+  images.forEach(function(b64, i) {{
+    if (!groups[i]) return;
+    const g = groups[i];
+    const img = new Image();
+    img.onload = function() {{
+      // Draw result at the crop's scaled position on the modified canvas
+      modCtx.drawImage(img,
+        Math.round(g.x * scaleX),
+        Math.round(g.y * scaleY),
+        Math.round(g.w * scaleX),
+        Math.round(g.h * scaleY)
+      );
+      loaded++;
+      _modCount += 1;
+      document.getElementById('modCount').textContent = '(' + _modCount + ' results)';
+    }};
+    img.src = 'data:image/png;base64,' + b64;
+  }});
 }}
 
 async function sendCropToComfyUI(b64DataUrl, statusEl, resultEl) {{
@@ -740,12 +776,18 @@ async function sendCropToComfyUI(b64DataUrl, statusEl, resultEl) {{
     }});
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
-    if (data.image_b64) {{
+    const imgs = data.images || (data.image_b64 ? [data.image_b64] : []);
+    if (imgs.length > 0) {{
       const img = document.createElement('img');
-      img.src = 'data:image/png;base64,' + data.image_b64;
+      img.src = 'data:image/png;base64,' + imgs[0];
       resultEl.appendChild(img);
       statusEl.textContent = 'Done \u2713';
       statusEl.style.color = '#3fb950';
+      // Find the group for this item from the button's parent
+      const item = statusEl.closest('.crop-item');
+      if (item && item._group) {{
+        compositeResultsOnCanvas(imgs, [item._group]);
+      }}
     }} else {{
       statusEl.textContent = 'No output';
       statusEl.style.color = '#8b949e';

@@ -28,18 +28,19 @@ except Exception as e:
 
 PORT = 8765
 
-# The ComfyUI workflow. Node "1733" is the LoadImage entry point —
+# The ComfyUI workflow. The LoadImage entry node is detected automatically —
 # its image input is replaced at runtime with the uploaded filename(s).
 BASE_WORKFLOW = {
-    "1733": {"inputs": {"image": ""}, "class_type": "LoadImage"},
-    "1740": {"inputs": {"num_columns": 4, "match_image_size": False, "max_resolution": 2048, "images": ["1733", 0]}, "class_type": "ImageConcatFromBatch"},
+    "1766": {"inputs": {"image": ""}, "class_type": "LoadImage"},
+    "1758": {"inputs": {"red": 0, "green": 0, "blue": 0, "threshold": 10, "image": ["1766", 0]}, "class_type": "MaskFromColor+"},
+    "1762": {"inputs": {"amount": 4, "device": "auto", "mask": ["1758", 0]}, "class_type": "MaskBlur+"},
+    "1764": {"inputs": {"upscale_method": "bicubic", "width": 512, "height": 512, "crop": "disabled", "image": ["1766", 0]}, "class_type": "ImageScale"},
+    "1765": {"inputs": {"height": 512, "width": 512, "interpolation_mode": "bicubic", "mask": ["1762", 0]}, "class_type": "JWMaskResize"},
+    "1740": {"inputs": {"num_columns": 4, "match_image_size": False, "max_resolution": 2048, "images": ["1764", 0]}, "class_type": "ImageConcatFromBatch"},
     "1741": {"inputs": {"columns": 4, "rows": 1, "image": ["1732:8", 0]}, "class_type": "ImageGridtoBatch"},
-    "1742": {"inputs": {"image": ["1741", 0], "alpha": ["1733", 1]}, "class_type": "JoinImageWithAlpha"},
-    "1743": {"inputs": {"images": ["1742", 0]}, "class_type": "PreviewImage"},
-    "1744": {"inputs": {"images": ["1733", 0]}, "class_type": "JWImageBatchCount"},
-    "1745": {"inputs": {"int1": ["1744", 0], "int2": 4}, "class_type": "Basic data handling: IntDivide"},
+    "1742": {"inputs": {"image": ["1741", 0], "alpha": ["1765", 0]}, "class_type": "JoinImageWithAlpha"},
     "1747": {"inputs": {"factor": 1, "method": "luminance (Rec.709)", "image": ["1740", 0]}, "class_type": "ImageDesaturate+"},
-    "1749": {"inputs": {"images": ["1733", 0]}, "class_type": "PreviewImage"},
+    "1767": {"inputs": {"filename_prefix": "ComfyUI", "images": ["1742", 0]}, "class_type": "SaveImage"},
     "1732:75":  {"inputs": {"strength": 1, "model": ["1732:66", 0]}, "class_type": "CFGNorm"},
     "1732:39":  {"inputs": {"vae_name": "qwen_image_vae.safetensors"}, "class_type": "VAELoader"},
     "1732:38":  {"inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default"}, "class_type": "CLIPLoader"},
@@ -53,11 +54,11 @@ BASE_WORKFLOW = {
     "1732:1493": {"inputs": {"image": ["1747", 0]}, "class_type": "GetImageSize"},
     "1732:1490": {"inputs": {"conditioning": ["1732:110", 0], "latent": ["1732:1729", 0]}, "class_type": "ReferenceLatent"},
     "1732:88":   {"inputs": {"pixels": ["1747", 0], "vae": ["1732:39", 0]}, "class_type": "VAEEncode"},
-    "1732:1729": {"inputs": {"noise_seed": 162164980917793, "noise_strength": 1, "latent": ["1732:88", 0]}, "class_type": "InjectLatentNoise+"},
+    "1732:1729": {"inputs": {"noise_seed": 195622442258469, "noise_strength": 1, "latent": ["1732:88", 0]}, "class_type": "InjectLatentNoise+"},
     "1732:1492": {"inputs": {"width": ["1732:1493", 0], "height": ["1732:1493", 1], "batch_size": 1}, "class_type": "EmptySD3LatentImage"},
-    "1732:3":    {"inputs": {"seed": 132915428671405, "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1, "model": ["1732:75", 0], "positive": ["1732:1491", 0], "negative": ["1732:1490", 0], "latent_image": ["1732:1730", 0]}, "class_type": "KSampler"},
+    "1732:3":    {"inputs": {"seed": 615229316583434, "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1, "model": ["1732:75", 0], "positive": ["1732:1491", 0], "negative": ["1732:1490", 0], "latent_image": ["1732:1730", 0]}, "class_type": "KSampler"},
     "1732:1731": {"inputs": {"confidence_threshold": 0.2, "text_prompt": "", "max_detections": -1, "offload_model": False}, "class_type": "SAM3Grounding"},
-    "1732:1730": {"inputs": {"noise_seed": 344407510921686, "noise_strength": 1, "latent": ["1732:1492", 0]}, "class_type": "InjectLatentNoise+"},
+    "1732:1730": {"inputs": {"noise_seed": 981899384112205, "noise_strength": 1, "latent": ["1732:1492", 0]}, "class_type": "InjectLatentNoise+"},
 }
 
 UPLOAD_PAGE = '''<!DOCTYPE html>
@@ -248,7 +249,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Build workflow — use custom if provided, else BASE_WORKFLOW
             import copy
             workflow = copy.deepcopy(custom_workflow if custom_workflow else BASE_WORKFLOW)
-            workflow["1733"]["inputs"]["image"] = filename
+            entry_id = self._find_entry_node(workflow)
+            if entry_id:
+                workflow[entry_id]["inputs"]["image"] = filename
 
             prompt_payload = json.dumps({"prompt": workflow}).encode()
             req = urllib.request.Request(
@@ -270,44 +273,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             print(f"  ComfyUI prompt_id: {prompt_id}")
 
-            # Poll /history until complete (max 30s)
-            image_b64 = None
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                time.sleep(0.5)
-                try:
-                    hist_req = urllib.request.Request(
-                        comfyui_url + '/api/history/' + prompt_id,
-                        headers=headers
-                    )
-                    with urllib.request.urlopen(hist_req, timeout=5) as resp:
-                        hist = json.loads(resp.read())
-                except Exception:
-                    continue
-
-                if prompt_id not in hist:
-                    continue
-                entry = hist[prompt_id]
-                if not entry.get('status', {}).get('completed'):
-                    continue
-
-                # Grab the first image output found
-                for node_out in entry.get('outputs', {}).values():
-                    for img_info in node_out.get('images', []):
-                        img_url = (comfyui_url + '/api/view?filename=' +
-                                   urllib.parse.quote(img_info['filename']) +
-                                   '&type=' + img_info.get('type', 'output'))
-                        if img_info.get('subfolder'):
-                            img_url += '&subfolder=' + urllib.parse.quote(img_info['subfolder'])
-                        img_req = urllib.request.Request(img_url, headers=headers)
-                        with urllib.request.urlopen(img_req, timeout=5) as img_resp:
-                            image_b64 = base64.b64encode(img_resp.read()).decode()
-                        break
-                    if image_b64:
-                        break
-                break
-
-            response = {'prompt_id': prompt_id, 'image_b64': image_b64}
+            images = self._poll_and_fetch_images(comfyui_url, prompt_id, headers)
+            response = {'prompt_id': prompt_id, 'images': images, 'image_b64': images[0] if images else None}
 
         except Exception as e:
             print(f"  ComfyUI error: {e}")
@@ -342,20 +309,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ValueError(f'Upload failed HTTP {e.code}: {err_body[:300]}')
         return result.get('name', result.get('filename', filename))
 
+    def _find_entry_node(self, workflow):
+        """Find the LoadImage node with a string filename (the entry point)."""
+        for node_id, node in workflow.items():
+            if node.get('class_type') == 'LoadImage':
+                image_input = node.get('inputs', {}).get('image', '')
+                if isinstance(image_input, str):
+                    return node_id
+        return None
+
     def _build_batch_workflow(self, filenames, custom_workflow=None):
-        """Take BASE_WORKFLOW, replace node 1733 with a LoadImage+ImageBatch chain,
-        and patch all references to ["1733", 0] (images) and ["1733", 1] (masks)."""
+        """Take BASE_WORKFLOW (or custom), find entry LoadImage node, replace with
+        a LoadImage+ImageBatch chain, patch all references to the entry node."""
         import copy
         workflow = copy.deepcopy(custom_workflow if custom_workflow else BASE_WORKFLOW)
-        del workflow["1733"]
+        entry_id = self._find_entry_node(workflow)
+        if not entry_id:
+            raise ValueError('No LoadImage entry node found in workflow')
+        del workflow[entry_id]
 
         # LoadImage nodes: IDs 10, 11, 12, ...
         for i, fname in enumerate(filenames):
             workflow[str(10 + i)] = {"inputs": {"image": fname}, "class_type": "LoadImage"}
 
         if len(filenames) == 1:
-            img_out  = ["10", 0]
-            mask_out = ["10", 1]
+            img_out = ["10", 0]
         else:
             # IMAGE batch chain: nodes 20, 21, ...
             workflow["20"] = {"inputs": {"image1": ["10", 0], "image2": ["11", 0]}, "class_type": "ImageBatch"}
@@ -366,32 +344,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }
             img_out = [str(20 + len(filenames) - 2), 0]
 
-            # MASK batch chain:
-            # Step 1 — MaskToImage for each mask (nodes 50, 51, ...): MASK → IMAGE
-            for i in range(len(filenames)):
-                workflow[str(50 + i)] = {
-                    "inputs": {"mask": [str(10 + i), 1]},
-                    "class_type": "MaskToImage"
-                }
-            # Step 2 — ImageBatch chain on those images (nodes 40, 41, ...)
-            workflow["40"] = {"inputs": {"image1": ["50", 0], "image2": ["51", 0]}, "class_type": "ImageBatch"}
-            for i in range(2, len(filenames)):
-                workflow[str(40 + i - 1)] = {
-                    "inputs": {"image1": [str(40 + i - 2), 0], "image2": [str(50 + i), 0]},
-                    "class_type": "ImageBatch"
-                }
-            # Step 3 — ImageToMask to convert back to MASK type (node 45)
-            workflow["45"] = {
-                "inputs": {"image": [str(40 + len(filenames) - 2), 0], "channel": "red"},
-                "class_type": "ImageToMask"
-            }
-            mask_out = ["45", 0]
-
-        # Patch all references to ["1733", 0] → img_out, ["1733", 1] → mask_out
+        # Patch all references to [entry_id, slot] with img_out
         for node in workflow.values():
             for key, val in node.get("inputs", {}).items():
-                if isinstance(val, list) and len(val) == 2 and val[0] == "1733":
-                    node["inputs"][key] = img_out if val[1] == 0 else mask_out
+                if isinstance(val, list) and len(val) == 2 and str(val[0]) == entry_id:
+                    node["inputs"][key] = list(img_out)
 
         return workflow
 
@@ -443,39 +400,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError('No prompt_id: ' + str(result))
             print(f"  Batch prompt_id: {prompt_id}", flush=True)
 
-            # Poll history
-            image_b64 = None
-            deadline = time.time() + 60
-            while time.time() < deadline:
-                time.sleep(0.5)
-                try:
-                    hist_req = urllib.request.Request(
-                        comfyui_url + '/api/history/' + prompt_id, headers=headers)
-                    with urllib.request.urlopen(hist_req, timeout=5) as resp:
-                        hist = json.loads(resp.read())
-                except Exception:
-                    continue
-                if prompt_id not in hist:
-                    continue
-                entry = hist[prompt_id]
-                if not entry.get('status', {}).get('completed'):
-                    continue
-                for node_out in entry.get('outputs', {}).values():
-                    for img_info in node_out.get('images', []):
-                        img_url = (comfyui_url + '/api/view?filename=' +
-                                   urllib.parse.quote(img_info['filename']) +
-                                   '&type=' + img_info.get('type', 'output'))
-                        if img_info.get('subfolder'):
-                            img_url += '&subfolder=' + urllib.parse.quote(img_info['subfolder'])
-                        img_req = urllib.request.Request(img_url, headers=headers)
-                        with urllib.request.urlopen(img_req, timeout=5) as img_resp:
-                            image_b64 = base64.b64encode(img_resp.read()).decode()
-                        break
-                    if image_b64:
-                        break
-                break
-
-            response = {'prompt_id': prompt_id, 'image_b64': image_b64}
+            images = self._poll_and_fetch_images(comfyui_url, prompt_id, headers, timeout=90)
+            response = {'prompt_id': prompt_id, 'images': images}
 
         except Exception as e:
             print(f"  Batch error: {e}", flush=True)
@@ -509,6 +435,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
         self.wfile.write(resp_bytes)
+
+    def _poll_and_fetch_images(self, comfyui_url, prompt_id, headers, timeout=60):
+        """Poll history until complete, fetch and return all result images as base64 list."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                hist_req = urllib.request.Request(
+                    comfyui_url + '/api/history/' + prompt_id, headers=headers)
+                with urllib.request.urlopen(hist_req, timeout=5) as resp:
+                    hist = json.loads(resp.read())
+            except Exception:
+                continue
+            if prompt_id not in hist:
+                continue
+            entry = hist[prompt_id]
+            if not entry.get('status', {}).get('completed'):
+                continue
+            images = []
+            for node_out in entry.get('outputs', {}).values():
+                for img_info in node_out.get('images', []):
+                    img_url = (comfyui_url + '/api/view?filename=' +
+                               urllib.parse.quote(img_info['filename']) +
+                               '&type=' + img_info.get('type', 'output'))
+                    if img_info.get('subfolder'):
+                        img_url += '&subfolder=' + urllib.parse.quote(img_info['subfolder'])
+                    img_req = urllib.request.Request(img_url, headers=headers)
+                    with urllib.request.urlopen(img_req, timeout=5) as img_resp:
+                        images.append(base64.b64encode(img_resp.read()).decode())
+            print(f"  Fetched {len(images)} result images", flush=True)
+            return images
+        return []
 
     def log_message(self, format, *args):
         print(f"  {args[0]}")
