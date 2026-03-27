@@ -32,13 +32,14 @@ PORT = 8765
 # its image input is replaced at runtime with the uploaded filename(s).
 BASE_WORKFLOW = {
     "1733": {"inputs": {"image": ""}, "class_type": "LoadImage"},
-    "1735": {"inputs": {"mask": ["1733", 1]}, "class_type": "InvertMask"},
     "1740": {"inputs": {"num_columns": 4, "match_image_size": False, "max_resolution": 2048, "images": ["1733", 0]}, "class_type": "ImageConcatFromBatch"},
-    "1741": {"inputs": {"columns": 4, "rows": ["1745", 0], "image": ["1732:8", 0]}, "class_type": "ImageGridtoBatch"},
-    "1742": {"inputs": {"image": ["1741", 0], "alpha": ["1735", 0]}, "class_type": "JoinImageWithAlpha"},
+    "1741": {"inputs": {"columns": 4, "rows": 1, "image": ["1732:8", 0]}, "class_type": "ImageGridtoBatch"},
+    "1742": {"inputs": {"image": ["1741", 0], "alpha": ["1733", 1]}, "class_type": "JoinImageWithAlpha"},
     "1743": {"inputs": {"images": ["1742", 0]}, "class_type": "PreviewImage"},
     "1744": {"inputs": {"images": ["1733", 0]}, "class_type": "JWImageBatchCount"},
     "1745": {"inputs": {"int1": ["1744", 0], "int2": 4}, "class_type": "Basic data handling: IntDivide"},
+    "1747": {"inputs": {"factor": 1, "method": "luminance (Rec.709)", "image": ["1740", 0]}, "class_type": "ImageDesaturate+"},
+    "1749": {"inputs": {"images": ["1733", 0]}, "class_type": "PreviewImage"},
     "1732:75":  {"inputs": {"strength": 1, "model": ["1732:66", 0]}, "class_type": "CFGNorm"},
     "1732:39":  {"inputs": {"vae_name": "qwen_image_vae.safetensors"}, "class_type": "VAELoader"},
     "1732:38":  {"inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default"}, "class_type": "CLIPLoader"},
@@ -46,12 +47,12 @@ BASE_WORKFLOW = {
     "1732:66":  {"inputs": {"shift": 3, "model": ["1732:89", 0]}, "class_type": "ModelSamplingAuraFlow"},
     "1732:8":   {"inputs": {"samples": ["1732:3", 0], "vae": ["1732:39", 0]}, "class_type": "VAEDecode"},
     "1732:89":  {"inputs": {"lora_name": "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors", "strength_model": 1, "model": ["1732:37", 0]}, "class_type": "LoraLoaderModelOnly"},
-    "1732:110": {"inputs": {"prompt": "", "clip": ["1732:38", 0], "vae": ["1732:39", 0], "image1": ["1740", 0]}, "class_type": "TextEncodeQwenImageEditPlus"},
-    "1732:111": {"inputs": {"prompt": "Imagine these are all icons for a mobile videogame. Colour them in a cohesive, consistent, modern palette. Cyberpunk style. Black background", "clip": ["1732:38", 0], "vae": ["1732:39", 0], "image1": ["1740", 0]}, "class_type": "TextEncodeQwenImageEditPlus"},
+    "1732:110": {"inputs": {"prompt": "", "clip": ["1732:38", 0], "vae": ["1732:39", 0], "image1": ["1747", 0]}, "class_type": "TextEncodeQwenImageEditPlus"},
+    "1732:111": {"inputs": {"prompt": "Imagine these are all icons for a mobile videogame. Colour them in a cohesive, consistent, modern palette. Cyberpunk style. Black background", "clip": ["1732:38", 0], "vae": ["1732:39", 0], "image1": ["1747", 0]}, "class_type": "TextEncodeQwenImageEditPlus"},
     "1732:1491": {"inputs": {"conditioning": ["1732:111", 0], "latent": ["1732:1729", 0]}, "class_type": "ReferenceLatent"},
-    "1732:1493": {"inputs": {"image": ["1740", 0]}, "class_type": "GetImageSize"},
+    "1732:1493": {"inputs": {"image": ["1747", 0]}, "class_type": "GetImageSize"},
     "1732:1490": {"inputs": {"conditioning": ["1732:110", 0], "latent": ["1732:1729", 0]}, "class_type": "ReferenceLatent"},
-    "1732:88":   {"inputs": {"pixels": ["1740", 0], "vae": ["1732:39", 0]}, "class_type": "VAEEncode"},
+    "1732:88":   {"inputs": {"pixels": ["1747", 0], "vae": ["1732:39", 0]}, "class_type": "VAEEncode"},
     "1732:1729": {"inputs": {"noise_seed": 162164980917793, "noise_strength": 1, "latent": ["1732:88", 0]}, "class_type": "InjectLatentNoise+"},
     "1732:1492": {"inputs": {"width": ["1732:1493", 0], "height": ["1732:1493", 1], "batch_size": 1}, "class_type": "EmptySD3LatentImage"},
     "1732:3":    {"inputs": {"seed": 132915428671405, "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1, "model": ["1732:75", 0], "positive": ["1732:1491", 0], "negative": ["1732:1490", 0], "latent_image": ["1732:1730", 0]}, "class_type": "KSampler"},
@@ -364,14 +365,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }
             img_out = [str(20 + len(filenames) - 2), 0]
 
-            # MASK batch chain: nodes 40, 41, ...
-            workflow["40"] = {"inputs": {"image1": ["10", 1], "image2": ["11", 1]}, "class_type": "ImageBatch"}
+            # MASK batch chain:
+            # Step 1 — MaskToImage for each mask (nodes 50, 51, ...): MASK → IMAGE
+            for i in range(len(filenames)):
+                workflow[str(50 + i)] = {
+                    "inputs": {"mask": [str(10 + i), 1]},
+                    "class_type": "MaskToImage"
+                }
+            # Step 2 — ImageBatch chain on those images (nodes 40, 41, ...)
+            workflow["40"] = {"inputs": {"image1": ["50", 0], "image2": ["51", 0]}, "class_type": "ImageBatch"}
             for i in range(2, len(filenames)):
                 workflow[str(40 + i - 1)] = {
-                    "inputs": {"image1": [str(40 + i - 2), 0], "image2": [str(10 + i), 1]},
+                    "inputs": {"image1": [str(40 + i - 2), 0], "image2": [str(50 + i), 0]},
                     "class_type": "ImageBatch"
                 }
-            mask_out = [str(40 + len(filenames) - 2), 0]
+            # Step 3 — ImageToMask to convert back to MASK type (node 45)
+            workflow["45"] = {
+                "inputs": {"image": [str(40 + len(filenames) - 2), 0], "channel": "red"},
+                "class_type": "ImageToMask"
+            }
+            mask_out = ["45", 0]
 
         # Patch all references to ["1733", 0] → img_out, ["1733", 1] → mask_out
         for node in workflow.values():
