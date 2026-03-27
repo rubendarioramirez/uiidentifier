@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Threshold → findContours</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; margin: 0; padding: 20px; }
+  h1 { text-align: center; font-size: 1.3em; margin-bottom: 16px; }
+  .container { display: flex; gap: 16px; max-width: 1400px; margin: 0 auto; justify-content: center; }
+  .panel { flex: 1; max-width: 680px; }
+  .panel h2 { font-size: 0.95em; color: #58a6ff; margin: 0 0 8px; }
+  .panel p { font-size: 0.8em; color: #8b949e; margin: 0 0 8px; }
+  .panel img { width: 100%; border: 1px solid #30363d; border-radius: 6px; }
+</style>
+</head>
+<body>
+<h1>Step 1: Threshold (BINARY, white bg) → Step 2: findContours — nothing else</h1>
+<div class="container">
+  <div class="panel">
+    <h2>Step 1: adaptiveThreshold(BINARY)</h2>
+    <p>Raw output. 0 = black outlines, 255 = white fill.</p>
+    <img src="mv5_thresh.png" alt="Threshold">
+  </div>
+  <div class="panel">
+    <h2>Step 2: findContours on that image</h2>
+    <p>2,338 contours found. Each drawn in a random color.</p>
+    <img src="mv5_contours.png" alt="Contours">
+  </div>
+</div>
+</body>
+</html>

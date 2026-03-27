@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+
+# Large generated pipeline intermediates (re-generate with generate_explorer.py)
+mv2_*.png
+mv3_*.png
+mv4_*.png
+mv5_*.png
+mv_step*.png
+step1_*.png
+step2_*.png
+step3_*.png
+step4_*.png
+*_comparison.png
+*_128x128.png
+*_32x32.png
+thresh_*.png
+ip_*.png
+
+# Large inline-data HTML files (re-generate with generate_explorer.py)
+contour_explorer.html
+contour_explorer_pixel.html
+contour_explorer_v2.html
+matchvillain_explorer.html
+pixel_table_128.html
+thresh_fullres_table.html
+thresh_pixel_table.html
+
+# Generated JSON
+contours.json

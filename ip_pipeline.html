@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pipeline — image_pixel.png</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; margin: 0; padding: 20px; }
+  h1 { text-align: center; font-size: 1.3em; margin-bottom: 16px; }
+  .sub { text-align: center; color: #8b949e; font-size: 0.85em; margin-bottom: 16px; }
+  .container { display: flex; gap: 14px; max-width: 1400px; margin: 0 auto; justify-content: center; }
+  .panel { flex: 1; max-width: 450px; text-align: center; }
+  .panel h2 { font-size: 0.9em; color: #58a6ff; margin: 0 0 6px; }
+  .panel p { font-size: 0.78em; color: #8b949e; margin: 0 0 6px; }
+  .panel img { width: 100%; border: 1px solid #30363d; border-radius: 6px; }
+</style>
+</head>
+<body>
+<h1>Pipeline: image_pixel.png</h1>
+<p class="sub">804 contours found. Same deterministic pipeline.</p>
+<div class="container">
+  <div class="panel">
+    <h2>Step 1: Original</h2>
+    <img src="image_pixel.png" alt="Original">
+  </div>
+  <div class="panel">
+    <h2>Step 2: Threshold (BINARY)</h2>
+    <img src="ip_thresh.png" alt="Threshold">
+  </div>
+  <div class="panel">
+    <h2>Step 3: Contours only (black bg)</h2>
+    <p>804 contours, no source image</p>
+    <img src="ip_contours_only.png" alt="Contours only">
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Contour Explorer Tool</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 16px; }
+  h1 { text-align: center; font-size: 1.3em; margin-bottom: 12px; }
+
+  .upload-area {
+    max-width: 600px; margin: 0 auto 16px; padding: 32px; text-align: center;
+    border: 2px dashed #30363d; border-radius: 12px; background: #161b22; cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .upload-area:hover, .upload-area.dragover { border-color: #58a6ff; }
+  .upload-area p { color: #8b949e; font-size: 0.95em; }
+  .upload-area input { display: none; }
+
+  .controls {
+    max-width: 1200px; margin: 0 auto 12px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px;
+    display: none;
+  }
+  .controls.visible { display: block; }
+  .slider-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .slider-row label { min-width: 110px; font-size: 0.85em; color: #8b949e; }
+  .slider-row input[type=range] { flex: 1; min-width: 150px; }
+  .slider-row .val { min-width: 70px; font-size: 0.85em; font-weight: bold; text-align: right; }
+  .slider-row .cb { display: flex; align-items: center; gap: 4px; font-size: 0.85em; color: #8b949e; }
+
+  .stats { font-size: 0.85em; color: #58a6ff; text-align: center; margin-top: 8px; }
+  .pipeline-label { font-size: 0.75em; color: #8b949e; text-align: center; margin-bottom: 4px; }
+
+  .views {
+    max-width: 1400px; margin: 0 auto; display: none;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px;
+  }
+  .views.visible { display: grid; }
+  .view-panel { text-align: center; }
+  .view-panel h2 { font-size: 0.85em; color: #58a6ff; margin-bottom: 4px; }
+  .view-panel canvas { max-width: 100%; border: 1px solid #30363d; border-radius: 4px; }
+
+  #loading { text-align: center; color: #f0883e; font-size: 0.9em; display: none; }
+
+  #info {
+    position: fixed; bottom: 16px; right: 16px; background: #161b22ee; border: 1px solid #30363d;
+    border-radius: 8px; padding: 12px; font-size: 0.78em; min-width: 200px; display: none; z-index: 10;
+  }
+  #info div { margin-bottom: 2px; }
+
+  .pipeline-steps {
+    max-width: 1200px; margin: 0 auto 12px; font-size: 0.8em; color: #8b949e; text-align: center;
+    display: none;
+  }
+  .pipeline-steps.visible { display: block; }
+  .pipeline-steps code { color: #58a6ff; }
+</style>
+</head>
+<body>
+<h1>Contour Explorer Tool</h1>
+
+<div class="upload-area" id="dropZone">
+  <p>Drop an image here or click to upload</p>
+  <p style="font-size:0.8em; margin-top:8px; color:#555">PNG, JPG, any size</p>
+  <input type="file" id="fileInput" accept="image/*">
+</div>
+
+<div id="loading">Processing pipeline... please wait</div>
+
+<div class="pipeline-steps" id="pipelineSteps">
+  Pipeline: <code>Original</code> &rarr; <code>Grayscale + Blur(5x5)</code> &rarr; <code>Adaptive Threshold (BINARY, 11, 2)</code> &rarr; <code>findContours (RETR_TREE)</code> &rarr; <code>Filter by area</code> &rarr; <code>Keep outermost parents</code> &rarr; <code>Solid fill</code>
+</div>
+
+<div class="controls" id="controls">
+  <div class="slider-row">
+    <label>Min area:</label>
+    <input type="range" id="minArea" min="0" max="10000" value="1000" step="50">
+    <div class="val" id="minAreaVal">1000</div>
+  </div>
+  <div class="slider-row">
+    <label>Max area:</label>
+    <input type="range" id="maxArea" min="1000" max="500000" value="50000" step="500">
+    <div class="val" id="maxAreaVal">50000</div>
+  </div>
+  <div class="slider-row">
+    <label class="cb"><input type="checkbox" id="onlyParents" checked> Only outermost parents</label>
+    <label class="cb"><input type="checkbox" id="showOutlines"> Show outlines</label>
+  </div>
+  <div class="stats" id="stats"></div>
+</div>
+
+<div class="views" id="views">
+  <div class="view-panel">
+    <h2>Original</h2>
+    <canvas id="cOriginal"></canvas>
+  </div>
+  <div class="view-panel">
+    <h2>Threshold (BINARY)</h2>
+    <canvas id="cThresh"></canvas>
+  </div>
+  <div class="view-panel">
+    <h2>Contours Only (black bg)</h2>
+    <canvas id="cContours"></canvas>
+  </div>
+  <div class="view-panel">
+    <h2>Solid Fill (filtered)</h2>
+    <canvas id="cFilled"></canvas>
+  </div>
+</div>
+
+<div id="info">
+  <div id="iText"></div>
+</div>
+
+<script async src="https://docs.opencv.org/4.9.0/opencv.js" onload="onOpenCvReady()" id="opencvScript"></script>
+
+<script>
+let cvReady = false;
+let CONTOURS = null;
+let IMG_W = 0, IMG_H = 0;
+
+function onOpenCvReady() {
+  cvReady = true;
+  console.log('OpenCV.js ready');
+}
+
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) processFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files.length > 0) processFile(e.target.files[0]);
+});
+
+function processFile(file) {
+  if (!cvReady) {
+    alert('OpenCV.js is still loading, please wait a moment and try again.');
+    return;
+  }
+  const loading = document.getElementById('loading');
+  loading.style.display = 'block';
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    const img = new Image();
+    img.onload = function() {
+      setTimeout(() => {
+        runPipeline(img);
+        loading.style.display = 'none';
+      }, 50);
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function runPipeline(imgEl) {
+  const src = cv.imread(imgEl);
+  IMG_W = src.cols;
+  IMG_H = src.rows;
+
+  drawMatToCanvas(src, 'cOriginal');
+
+  const gray = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const blurred = new cv.Mat();
+  cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 1.5);
+
+  const thresh = new cv.Mat();
+  cv.adaptiveThreshold(blurred, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+                        cv.THRESH_BINARY, 11, 2);
+
+  const threshColor = new cv.Mat();
+  cv.cvtColor(thresh, threshColor, cv.COLOR_GRAY2RGBA);
+  drawMatToCanvas(threshColor, 'cThresh');
+  threshColor.delete();
+
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  cv.findContours(thresh, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
+
+  const numContours = contours.size();
+  console.log('Found ' + numContours + ' contours');
+
+  const contoursVis = cv.Mat.zeros(IMG_H, IMG_W, cv.CV_8UC4);
+  for (let i = 0; i < numContours; i++) {
+    const hue = (i * 137.508) % 360;
+    const rgb = hslToRgb(hue, 75, 55);
+    cv.drawContours(contoursVis, contours, i, new cv.Scalar(rgb[0], rgb[1], rgb[2], 255), 1);
+  }
+  drawMatToCanvas(contoursVis, 'cContours');
+  contoursVis.delete();
+
+  CONTOURS = [];
+  for (let i = 0; i < numContours; i++) {
+    const cnt = contours.get(i);
+    const area = cv.contourArea(cnt);
+    const peri = cv.arcLength(cnt, true);
+    const rect = cv.boundingRect(cnt);
+    const circularity = peri > 0 ? (4 * Math.PI * area / (peri * peri)) : 0;
+    const aspect = rect.height > 0 ? rect.width / rect.height : 0;
+    const extent = (rect.width * rect.height) > 0 ? area / (rect.width * rect.height) : 0;
+
+    const parent = hierarchy.intPtr(0, i)[3];
+
+    let numChildren = 0;
+    let child = hierarchy.intPtr(0, i)[2];
+    while (child !== -1) {
+      numChildren++;
+      child = hierarchy.intPtr(0, child)[0];
+    }
+
+    let depth = 0;
+    let p = parent;
+    while (p !== -1) {
+      depth++;
+      p = hierarchy.intPtr(0, p)[3];
+    }
+
+    const points = [];
+    for (let j = 0; j < cnt.rows; j++) {
+      points.push([cnt.intAt(j, 0), cnt.intAt(j, 1)]);
+    }
+
+    CONTOURS.push({
+      id: i, area: Math.round(area), perimeter: Math.round(peri * 10) / 10,
+      x: rect.x, y: rect.y, w: rect.width, h: rect.height,
+      circularity: Math.round(circularity * 1000) / 1000,
+      aspect: Math.round(aspect * 100) / 100,
+      extent: Math.round(extent * 1000) / 1000,
+      parent: parent, children: numChildren, depth: depth,
+      points: points
+    });
+  }
+
+  const maxArea = Math.max.apply(null, CONTOURS.map(function(c) { return c.area; }));
+  document.getElementById('maxArea').max = Math.min(maxArea, 2000000);
+
+  src.delete(); gray.delete(); blurred.delete(); thresh.delete();
+  contours.delete(); hierarchy.delete();
+
+  document.getElementById('controls').classList.add('visible');
+  document.getElementById('views').classList.add('visible');
+  document.getElementById('pipelineSteps').classList.add('visible');
+  dropZone.style.display = 'none';
+
+  drawFilled();
+}
+
+function drawMatToCanvas(mat, canvasId) {
+  const canvas = document.getElementById(canvasId);
+  canvas.width = mat.cols;
+  canvas.height = mat.rows;
+  cv.imshow(canvas, mat);
+}
+
+function hslToRgb(h, s, l) {
+  s /= 100; l /= 100;
+  const k = function(n) { return (n + h / 30) % 12; };
+  const a = s * Math.min(l, 1 - l);
+  const f = function(n) { return l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1))); };
+  return [Math.round(f(0)*255), Math.round(f(8)*255), Math.round(f(4)*255)];
+}
+
+function drawFilled() {
+  if (!CONTOURS) return;
+
+  const minA = +document.getElementById('minArea').value;
+  const maxA = +document.getElementById('maxArea').value;
+  const onlyParents = document.getElementById('onlyParents').checked;
+  const showOutlines = document.getElementById('showOutlines').checked;
+
+  document.getElementById('minAreaVal').textContent = minA.toLocaleString();
+  document.getElementById('maxAreaVal').textContent = maxA.toLocaleString();
+
+  const canvas = document.getElementById('cFilled');
+  canvas.width = IMG_W;
+  canvas.height = IMG_H;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, IMG_W, IMG_H);
+
+  // Filter by area
+  const visibleSet = new Set();
+  for (var ci = 0; ci < CONTOURS.length; ci++) {
+    if (CONTOURS[ci].area >= minA && CONTOURS[ci].area <= maxA) visibleSet.add(CONTOURS[ci].id);
+  }
+
+  // Keep only outermost parents
+  var filtered;
+  if (onlyParents) {
+    filtered = CONTOURS.filter(function(c) {
+      if (!visibleSet.has(c.id)) return false;
+      var p = c.parent;
+      while (p !== -1) {
+        if (visibleSet.has(p)) return false;
+        p = CONTOURS[p].parent;
+      }
+      return true;
+    });
+  } else {
+    filtered = CONTOURS.filter(function(c) { return visibleSet.has(c.id); });
+  }
+
+  // Sort largest first so smaller shapes draw on top
+  filtered.sort(function(a, b) { return b.area - a.area; });
+
+  var colorIdx = 0;
+  for (var fi = 0; fi < filtered.length; fi++) {
+    var c = filtered[fi];
+    if (c.points.length < 3) continue;
+    var hue = (colorIdx * 137.508) % 360;
+    var rgb = hslToRgb(hue, 75, 55);
+    colorIdx++;
+
+    ctx.beginPath();
+    ctx.moveTo(c.points[0][0], c.points[0][1]);
+    for (var pi = 1; pi < c.points.length; pi++) {
+      ctx.lineTo(c.points[pi][0], c.points[pi][1]);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+    ctx.fill();
+
+    if (showOutlines) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    c._color = ctx.fillStyle;
+  }
+
+  window._filtered = filtered;
+  document.getElementById('stats').textContent =
+    'Showing ' + filtered.length + ' / ' + CONTOURS.length + ' contours (area ' + minA.toLocaleString() + ' - ' + maxA.toLocaleString() + ')';
+}
+
+['minArea', 'maxArea'].forEach(function(id) {
+  document.getElementById(id).addEventListener('input', drawFilled);
+});
+['onlyParents', 'showOutlines'].forEach(function(id) {
+  document.getElementById(id).addEventListener('change', drawFilled);
+});
+
+document.getElementById('cFilled').addEventListener('mousemove', function(e) {
+  var filtered = window._filtered || [];
+  var canvas = document.getElementById('cFilled');
+  var rect = canvas.getBoundingClientRect();
+  var scaleX = IMG_W / rect.width;
+  var scaleY = IMG_H / rect.height;
+  var mx = (e.clientX - rect.left) * scaleX;
+  var my = (e.clientY - rect.top) * scaleY;
+
+  var best = null;
+  for (var i = 0; i < filtered.length; i++) {
+    var c = filtered[i];
+    if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) {
+      if (!best || c.area < best.area) best = c;
+    }
+  }
+
+  var info = document.getElementById('info');
+  if (best) {
+    info.style.display = 'block';
+    document.getElementById('iText').innerHTML =
+      '<div style="width:100%;height:6px;background:' + best._color + ';border-radius:3px;margin-bottom:6px"></div>' +
+      '<b>#' + best.id + '</b> | Area: ' + best.area.toLocaleString() + '<br>' +
+      'Size: ' + best.w + 'x' + best.h + '<br>' +
+      'Circularity: ' + best.circularity + '<br>' +
+      'Aspect: ' + best.aspect + ' | Extent: ' + best.extent + '<br>' +
+      'Vertices: ' + best.points.length + '<br>' +
+      'Children: ' + best.children + ' | Depth: ' + best.depth + '<br>' +
+      'Parent: ' + best.parent;
+  } else {
+    info.style.display = 'none';
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Shape Detection — Match Villain</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; margin: 0; padding: 20px; }
+  h1 { text-align: center; font-size: 1.4em; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #8b949e; margin-bottom: 20px; font-size: 0.9em; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; max-width: 1400px; margin: 0 auto; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .card h2 { font-size: 0.9em; padding: 10px 14px 4px; margin: 0; color: #58a6ff; }
+  .card p { font-size: 0.78em; padding: 0 14px 8px; margin: 0; color: #8b949e; line-height: 1.4; }
+  .card img { width: 100%; display: block; }
+  .legend { max-width: 1400px; margin: 16px auto; display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.85em; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; }
+  .stats { max-width: 1400px; margin: 0 auto 16px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; }
+  .stats h2 { color: #58a6ff; font-size: 1em; margin: 0 0 8px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .stat { text-align: center; }
+  .stat .num { font-size: 2em; font-weight: bold; }
+  .stat .label { font-size: 0.8em; color: #8b949e; }
+  .note { max-width: 1400px; margin: 16px auto; background: #1c1e26; border-left: 3px solid #f0883e; padding: 12px 16px; border-radius: 4px; font-size: 0.85em; line-height: 1.5; }
+  .note strong { color: #f0883e; }
+</style>
+</head>
+<body>
+<h1>Shape Detection — matchvillain.png</h1>
+<p class="subtitle">Two approaches compared: Edge-based (Canny) vs. Color-based (HSV segmentation)</p>
+
+<div class="note">
+  <strong>Why did the first image (image.jpeg) miss shapes?</strong>
+  Canny edge detection relies on sharp gradient jumps between neighboring pixels. The first screenshot had heavy gradients, anti-aliasing, transparency, and overlapping UI layers — causing edges to fragment. Broken edges → broken contours → missed shapes. This match-3 game has much more distinct color blocks, so both approaches work better here. The color-based approach (Step 4) is particularly effective because it groups pixels by hue rather than hunting for edges.
+</div>
+
+<div class="stats">
+  <h2>Detection Results</h2>
+  <div class="stats-grid">
+    <div class="stat"><div class="num" style="color:#00ff00">8</div><div class="label">Rectangles (Canny)</div></div>
+    <div class="stat"><div class="num" style="color:#ffff00">27</div><div class="label">Circles (Canny)</div></div>
+    <div class="stat"><div class="num" style="color:#ff4444">49</div><div class="label">Other polygons (Canny)</div></div>
+    <div class="stat"><div class="num" style="color:#58a6ff">124</div><div class="label">Color-segmented shapes</div></div>
+  </div>
+</div>
+
+<div class="legend">
+  <strong>Canny approach:</strong>
+  <div class="legend-item"><div class="dot" style="background:#00ff00"></div> Rectangles</div>
+  <div class="legend-item"><div class="dot" style="background:#ffff00"></div> Circles</div>
+  <div class="legend-item"><div class="dot" style="background:#ff0000"></div> Other polygons</div>
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  <strong>Color approach:</strong>
+  <div class="legend-item"><div class="dot" style="background:#ff0000"></div> Red</div>
+  <div class="legend-item"><div class="dot" style="background:#00ff00"></div> Green</div>
+  <div class="legend-item"><div class="dot" style="background:#ff6400"></div> Blue</div>
+  <div class="legend-item"><div class="dot" style="background:#00ffff"></div> Yellow</div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Step 0: Original</h2>
+    <p>Raw game screenshot</p>
+    <img src="matchvillain.png" alt="Original">
+  </div>
+  <div class="card">
+    <h2>Step 1: Canny Edges</h2>
+    <p>Gradient jumps → white pixels mark edges</p>
+    <img src="mv_step1_edges.png" alt="Canny edges">
+  </div>
+  <div class="card">
+    <h2>Step 1b: Adaptive Threshold</h2>
+    <p>Local brightness thresholding — more detail</p>
+    <img src="mv_step1b_adaptive.png" alt="Adaptive threshold">
+  </div>
+  <div class="card">
+    <h2>Step 2: Shapes on Original (Canny)</h2>
+    <p>Contours from Canny edges classified as rectangles, circles, polygons</p>
+    <img src="mv_step2_annotated.png" alt="Shapes on original">
+  </div>
+  <div class="card">
+    <h2>Step 3: Shapes on Edges</h2>
+    <p>Same detections overlaid on the edge map</p>
+    <img src="mv_step3_edges_shapes.png" alt="Shapes on edges">
+  </div>
+  <div class="card">
+    <h2>Step 4: Color Segmentation (HSV)</h2>
+    <p>Groups pixels by hue, then finds contours per color — 124 shapes found</p>
+    <img src="mv_step4_color_segmentation.png" alt="Color segmentation">
+  </div>
+</div>
+
+<div class="grid" style="grid-template-columns: 1fr; margin-top: 16px;">
+  <div class="card">
+    <h2>Comparison: Canny Shapes vs. Color Segmentation</h2>
+    <p>Left = edge-based detection. Right = color-based detection. Color segmentation finds far more game pieces because it doesn't depend on clean edge boundaries.</p>
+    <img src="mv_step5_comparison.png" alt="Comparison">
+  </div>
+</div>
+</body>
+</html>

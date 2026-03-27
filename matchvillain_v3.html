@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Shape Detection v3 — White BG Threshold</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; margin: 0; padding: 20px; }
+  h1 { text-align: center; font-size: 1.4em; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #8b949e; margin-bottom: 20px; font-size: 0.9em; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; max-width: 1200px; margin: 0 auto; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; max-width: 1200px; margin: 14px auto 0; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .card h2 { font-size: 0.9em; padding: 10px 14px 4px; margin: 0; color: #58a6ff; }
+  .card p { font-size: 0.78em; padding: 0 14px 8px; margin: 0; color: #8b949e; line-height: 1.4; }
+  .card img { width: 100%; display: block; }
+  .legend { max-width: 1200px; margin: 16px auto; display: flex; gap: 18px; justify-content: center; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.85em; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; }
+  .stats { max-width: 1200px; margin: 0 auto 16px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; }
+  .stats h2 { color: #58a6ff; font-size: 1em; margin: 0 0 8px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .stat { text-align: center; }
+  .stat .num { font-size: 2em; font-weight: bold; }
+  .stat .label { font-size: 0.75em; color: #8b949e; }
+  .note { max-width: 1200px; margin: 16px auto; background: #1c1e26; border-left: 3px solid #f0883e; padding: 12px 16px; border-radius: 4px; font-size: 0.85em; line-height: 1.6; }
+  .note strong { color: #f0883e; }
+  .full { max-width: 1200px; margin: 14px auto 0; }
+  .full img { width: 100%; border-radius: 8px; border: 1px solid #30363d; }
+  .full h2 { font-size: 1em; color: #58a6ff; margin-bottom: 8px; }
+  .vs { max-width: 1200px; margin: 20px auto; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; }
+  .vs h2 { color: #d2a8ff; font-size: 1em; margin: 0 0 8px; }
+  .vs table { width: 100%; font-size: 0.85em; border-collapse: collapse; }
+  .vs td, .vs th { padding: 6px 12px; border-bottom: 1px solid #30363d; text-align: center; }
+  .vs th { color: #8b949e; }
+</style>
+</head>
+<body>
+<h1>Shape Detection v3 — THRESH_BINARY (White Background)</h1>
+<p class="subtitle">Pipeline: Grayscale → Blur → Adaptive Threshold (BINARY) → Erode (separate pieces) → Contours → Classify</p>
+
+<div class="note">
+  <strong>Key insight: BINARY vs BINARY_INV changes what findContours sees.</strong>
+  With THRESH_BINARY, game pieces are white blobs that merge together — adjacent pieces share thin black borders. Without erosion, findContours sees ~5 giant merged shapes. After eroding with a 5×5 kernel (3 iterations), the white blobs shrink and separate, yielding 330 individual contours → 58 classified shapes. The INV version (v2) found 142 shapes because the dark outlines were already naturally separated.
+</div>
+
+<div class="stats">
+  <h2>v3 Results (THRESH_BINARY + Erosion)</h2>
+  <div class="stats-grid">
+    <div class="stat"><div class="num" style="color:#ff00ff">4</div><div class="label">Rounded Rects</div></div>
+    <div class="stat"><div class="num" style="color:#ffff00">23</div><div class="label">Circles</div></div>
+    <div class="stat"><div class="num" style="color:#ff4444">31</div><div class="label">Other Polygons</div></div>
+  </div>
+</div>
+
+<div class="vs">
+  <h2>Comparison: v2 (INV) vs v3 (BINARY + Erosion)</h2>
+  <table>
+    <tr><th></th><th>v2: THRESH_BINARY_INV</th><th>v3: THRESH_BINARY + Erode</th></tr>
+    <tr><td>Raw contours</td><td>948</td><td>330</td></tr>
+    <tr><td>Rectangles</td><td style="color:#0f0">1</td><td style="color:#0f0">0</td></tr>
+    <tr><td>Rounded Rects</td><td style="color:#f0f">8</td><td style="color:#f0f">4</td></tr>
+    <tr><td>Circles</td><td style="color:#ff0">42</td><td style="color:#ff0">23</td></tr>
+    <tr><td>Other</td><td style="color:#f44">89</td><td style="color:#f44">31</td></tr>
+    <tr><td><strong>Total</strong></td><td><strong>142</strong></td><td><strong>58</strong></td></tr>
+    <tr><td>Why</td><td>Outlines are naturally separated → more contours</td><td>Erosion shrinks shapes → some get lost or distorted</td></tr>
+  </table>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:#00ff00"></div> Rectangle</div>
+  <div class="legend-item"><div class="dot" style="background:#ff00ff"></div> Rounded Rect</div>
+  <div class="legend-item"><div class="dot" style="background:#ffff00"></div> Circle</div>
+  <div class="legend-item"><div class="dot" style="background:#00a5ff"></div> Triangle</div>
+  <div class="legend-item"><div class="dot" style="background:#ff0000"></div> Other polygon</div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Step 1: Threshold (BINARY, white bg)</h2>
+    <p>Game pieces are white. Adjacent pieces merge because only thin black lines separate them.</p>
+    <img src="mv3_step1_threshold.png" alt="Threshold">
+  </div>
+  <div class="card">
+    <h2>Step 1b: After Erosion (pieces separated)</h2>
+    <p>5×5 erosion kernel × 3 iterations shrinks white blobs until they no longer touch.</p>
+    <img src="mv3_step1b_separated.png" alt="Eroded threshold">
+  </div>
+  <div class="card">
+    <h2>Step 2: Contours on White-BG Threshold</h2>
+    <p>Shapes drawn over the original threshold. Fewer detections than v2 — erosion distorts some shapes.</p>
+    <img src="mv3_step2_contours_on_thresh.png" alt="Contours on threshold">
+  </div>
+  <div class="card">
+    <h2>Step 3: Shapes on Original</h2>
+    <p>58 shapes detected. Circles and rounded rects visible, but erosion lost some pieces entirely.</p>
+    <img src="mv3_step3_annotated.png" alt="Annotated">
+  </div>
+</div>
+
+<div class="full">
+  <h2>Board Zoom: Original → Threshold w/ Contours → Annotated</h2>
+  <img src="mv3_step4_board_comparison.png" alt="Board comparison">
+</div>
+</body>
+</html>

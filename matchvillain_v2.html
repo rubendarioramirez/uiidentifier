@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Shape Detection v2 — From Adaptive Threshold</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; margin: 0; padding: 20px; }
+  h1 { text-align: center; font-size: 1.4em; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #8b949e; margin-bottom: 20px; font-size: 0.9em; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; max-width: 1200px; margin: 0 auto; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; max-width: 1200px; margin: 16px auto 0; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .card h2 { font-size: 0.9em; padding: 10px 14px 4px; margin: 0; color: #58a6ff; }
+  .card p { font-size: 0.78em; padding: 0 14px 8px; margin: 0; color: #8b949e; line-height: 1.4; }
+  .card img { width: 100%; display: block; }
+  .legend { max-width: 1200px; margin: 16px auto; display: flex; gap: 18px; justify-content: center; flex-wrap: wrap; align-items: center; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.85em; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; }
+  .stats { max-width: 1200px; margin: 0 auto 16px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; }
+  .stats h2 { color: #58a6ff; font-size: 1em; margin: 0 0 8px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .stat { text-align: center; }
+  .stat .num { font-size: 2em; font-weight: bold; }
+  .stat .label { font-size: 0.75em; color: #8b949e; }
+  .note { max-width: 1200px; margin: 16px auto; background: #1c1e26; border-left: 3px solid #3fb950; padding: 12px 16px; border-radius: 4px; font-size: 0.85em; line-height: 1.6; }
+  .note strong { color: #3fb950; }
+  .full { max-width: 1200px; margin: 16px auto 0; }
+  .full img { width: 100%; border-radius: 8px; border: 1px solid #30363d; }
+  .full h2 { font-size: 1em; color: #58a6ff; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<h1>Shape Detection v2 — Built from Adaptive Threshold</h1>
+<p class="subtitle">matchvillain.png — Pipeline: Grayscale → Blur → Adaptive Threshold → Contours → Classify</p>
+
+<div class="note">
+  <strong>Fix applied:</strong> In v1, Step 2 ignored the adaptive threshold (Step 1b) and restarted from Canny edges — losing all that clean outline data. Now the pipeline flows correctly: the adaptive threshold output feeds directly into contour detection, giving us much more consistent shape identification. 948 raw contours → 142 classified shapes.
+</div>
+
+<div class="stats">
+  <h2>Detection Results</h2>
+  <div class="stats-grid">
+    <div class="stat"><div class="num" style="color:#00ff00">1</div><div class="label">Rectangles</div></div>
+    <div class="stat"><div class="num" style="color:#ff00ff">8</div><div class="label">Rounded Rects</div></div>
+    <div class="stat"><div class="num" style="color:#ffff00">42</div><div class="label">Circles</div></div>
+    <div class="stat"><div class="num" style="color:#00a5ff">2</div><div class="label">Triangles</div></div>
+    <div class="stat"><div class="num" style="color:#ff4444">89</div><div class="label">Other Polygons</div></div>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:#00ff00"></div> Rectangle (4v, high extent)</div>
+  <div class="legend-item"><div class="dot" style="background:#ff00ff"></div> Rounded Rect (medium circularity)</div>
+  <div class="legend-item"><div class="dot" style="background:#ffff00"></div> Circle (high circularity)</div>
+  <div class="legend-item"><div class="dot" style="background:#00a5ff"></div> Triangle (3 vertices)</div>
+  <div class="legend-item"><div class="dot" style="background:#ff0000"></div> Other polygon</div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Step 1: Adaptive Threshold (the starting point)</h2>
+    <p>Local brightness thresholding — captures every game piece outline cleanly. This is what we feed into contour detection.</p>
+    <img src="mv2_step1_threshold.png" alt="Adaptive threshold">
+  </div>
+  <div class="card">
+    <h2>Step 2: Contours on Threshold</h2>
+    <p>Contours found and classified directly from the threshold map. Cyan = circles, magenta = rounded rects, red = other polygons.</p>
+    <img src="mv2_step2_contours.png" alt="Contours on threshold">
+  </div>
+  <div class="card">
+    <h2>Step 3: Shapes on Original</h2>
+    <p>Same detections drawn over the original image. 142 shapes identified — every game piece gets highlighted.</p>
+    <img src="mv2_step3_annotated.png" alt="Annotated original">
+  </div>
+  <div class="card">
+    <h2>Original (for comparison)</h2>
+    <p>The raw input image with no annotations.</p>
+    <img src="matchvillain.png" alt="Original">
+  </div>
+</div>
+
+<div class="full">
+  <h2>Game Board Zoom: Original → Threshold Contours → Annotated</h2>
+  <img src="mv2_step4_board_comparison.png" alt="Board comparison">
+</div>
+</body>
+</html>
