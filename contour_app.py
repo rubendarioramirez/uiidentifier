@@ -456,6 +456,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             images = []
             for node_out in entry.get('outputs', {}).values():
                 for img_info in node_out.get('images', []):
+                    if img_info.get('type') != 'output':
+                        continue
                     img_url = (comfyui_url + '/api/view?filename=' +
                                urllib.parse.quote(img_info['filename']) +
                                '&type=' + img_info.get('type', 'output'))
