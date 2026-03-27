@@ -135,6 +135,19 @@ def generate_html(data, image_name="uploaded image"):
   .crop-item .crop-label {{
     font-size: 0.7em; color: #8b949e; margin-top: 4px; white-space: nowrap;
   }}
+  .comfy-config {{ display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }}
+  .comfy-config label {{ font-size: 0.85em; color: #8b949e; }}
+  .comfy-config input {{ background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #e6edf3; padding: 3px 8px; font-size: 0.85em; width: 200px; }}
+  .comfy-config button {{ padding: 4px 12px; background: #21262d; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; font-size: 0.85em; }}
+  .comfy-config button:hover {{ background: #30363d; }}
+  .comfy-btn {{ margin-top: 4px; font-size: 0.7em; padding: 2px 6px; background: #21262d; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; width: 100%; }}
+  .comfy-btn:hover {{ background: #30363d; }}
+  .bg-btn {{ margin-top: 4px; font-size: 0.7em; padding: 2px 6px; background: #21262d; color: #a5d6a7; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; width: 100%; }}
+  .bg-btn:hover {{ background: #30363d; }}
+  .comfy-status {{ font-size: 0.65em; color: #8b949e; min-height: 14px; margin-top: 2px; text-align: center; }}
+  .comfy-result img {{ max-width: 120px; max-height: 120px; border-radius: 4px; margin-top: 4px; display: block; }}
+  .crop-checkbox {{ position: absolute; top: 4px; left: 4px; width: 16px; height: 16px; cursor: pointer; accent-color: #ffa657; }}
+  .crop-item {{ position: relative; }}
 
   #info {{
     position: fixed; bottom: 16px; right: 16px; background: #161b22ee; border: 1px solid #30363d;
@@ -189,6 +202,17 @@ def generate_html(data, image_name="uploaded image"):
 
 <div class="crops-section">
   <h2>Cropped Icons from Original (<span id="cropCount">0</span> cuts)</h2>
+  <div class="comfy-config">
+    <label>ComfyUI URL:</label>
+    <input type="text" id="comfyUrl" value="https://cloud.comfy.org">
+    <label>API Key:</label>
+    <input type="password" id="comfyApiKey" placeholder="comfyui-..." style="width:180px;">
+    <button onclick="removeAllBg()" style="color:#a5d6a7;">Remove All BG</button>
+    <button onclick="sendAllToComfyUI()">Send All &rarr; ComfyUI</button>
+    <button onclick="toggleSelectAll()" id="selectAllBtn" style="color:#ffa657;">Select All</button>
+    <button onclick="sendBatchToComfyUI()" style="color:#ffa657;">Send Batch &rarr; ComfyUI</button>
+    <span id="batchStatus" style="font-size:0.8em;color:#8b949e;"></span>
+  </div>
   <div class="crops-grid" id="cropsGrid"></div>
 </div>
 
@@ -475,8 +499,8 @@ function generateCrops(groups) {{
     lbl.textContent = '#' + g.id + (g.count > 1 ? ' +' + (g.count - 1) : '') + ' (' + g.w + '×' + g.h + ')';
     item.appendChild(lbl);
 
-    item.title = 'Click to download' + (g.count > 1 ? ' (' + g.count + ' merged)' : '');
-    item.addEventListener('click', (function(cd, cw, ch, gid) {{
+    item.title = 'Click canvas to download' + (g.count > 1 ? ' (' + g.count + ' merged)' : '');
+    cropCanvas.addEventListener('click', (function(cd, cw, ch, gid) {{
       return function() {{
         const dl = document.createElement('canvas');
         dl.width = cw; dl.height = ch;
@@ -488,11 +512,180 @@ function generateCrops(groups) {{
       }};
     }})(cropData, cropW, cropH, g.id));
 
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'crop-checkbox';
+    checkbox.addEventListener('change', () => {{
+      item.style.outline = checkbox.checked ? '2px solid #ffa657' : 'none';
+    }});
+    item.appendChild(checkbox);
+
+    const bgBtn = document.createElement('button');
+    bgBtn.className = 'bg-btn';
+    bgBtn.textContent = 'Remove BG';
+    const comfyBtn = document.createElement('button');
+    comfyBtn.className = 'comfy-btn';
+    comfyBtn.textContent = '\u2192 ComfyUI';
+    const comfyStatus = document.createElement('div');
+    comfyStatus.className = 'comfy-status';
+    const comfyResult = document.createElement('div');
+    comfyResult.className = 'comfy-result';
+    bgBtn.addEventListener('click', (function(it, c, s) {{
+      return function() {{ removeCropBg(it, c, s); }};
+    }})(item, cropCanvas, comfyStatus));
+    comfyBtn.addEventListener('click', (function(it, c, s, r) {{
+      return function() {{
+        const b64 = it._rgbaB64 || c.toDataURL('image/png');
+        sendCropToComfyUI(b64, s, r);
+      }};
+    }})(item, cropCanvas, comfyStatus, comfyResult));
+    item.appendChild(bgBtn);
+    item.appendChild(comfyBtn);
+    item.appendChild(comfyStatus);
+    item.appendChild(comfyResult);
+
     grid.appendChild(item);
     count++;
   }}
 
   document.getElementById('cropCount').textContent = count;
+}}
+
+function drawCheckerboard(ctx, w, h) {{
+  const size = 8;
+  for (let y = 0; y < h; y += size) {{
+    for (let x = 0; x < w; x += size) {{
+      ctx.fillStyle = ((Math.floor(x/size) + Math.floor(y/size)) % 2 === 0) ? '#cccccc' : '#ffffff';
+      ctx.fillRect(x, y, size, size);
+    }}
+  }}
+}}
+
+async function removeCropBg(item, cropCanvas, statusEl) {{
+  statusEl.textContent = 'Removing BG\u2026';
+  statusEl.style.color = '#f0883e';
+  try {{
+    const resp = await fetch('/remove_bg', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{base64: cropCanvas.toDataURL('image/png')}})
+    }});
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    item._rgbaB64 = 'data:image/png;base64,' + data.image_b64;
+    const img = new Image();
+    img.onload = function() {{
+      const ctx = cropCanvas.getContext('2d');
+      ctx.clearRect(0, 0, cropCanvas.width, cropCanvas.height);
+      drawCheckerboard(ctx, cropCanvas.width, cropCanvas.height);
+      ctx.drawImage(img, 0, 0, cropCanvas.width, cropCanvas.height);
+      statusEl.textContent = 'BG removed \u2713';
+      statusEl.style.color = '#3fb950';
+    }};
+    img.src = item._rgbaB64;
+  }} catch(e) {{
+    statusEl.textContent = e.message;
+    statusEl.style.color = '#f85149';
+  }}
+}}
+
+function toggleSelectAll() {{
+  const checkboxes = document.querySelectorAll('.crop-checkbox');
+  const anyUnchecked = [...checkboxes].some(c => !c.checked);
+  checkboxes.forEach(c => {{
+    c.checked = anyUnchecked;
+    c.closest('.crop-item').style.outline = anyUnchecked ? '2px solid #ffa657' : 'none';
+  }});
+  document.getElementById('selectAllBtn').textContent = anyUnchecked ? 'Deselect All' : 'Select All';
+}}
+
+async function sendBatchToComfyUI() {{
+  const comfyUrl = (document.getElementById('comfyUrl').value || 'http://localhost:8188').replace(/[/]+$/, '');
+  const apiKey = document.getElementById('comfyApiKey').value;
+  const statusEl = document.getElementById('batchStatus');
+
+  const items = [...document.querySelectorAll('.crop-item')].filter(item => {{
+    const cb = item.querySelector('.crop-checkbox');
+    return cb && cb.checked;
+  }});
+
+  if (items.length === 0) {{
+    statusEl.textContent = 'No crops selected.';
+    statusEl.style.color = '#f85149';
+    return;
+  }}
+
+  statusEl.textContent = 'Uploading ' + items.length + ' crops\u2026';
+  statusEl.style.color = '#f0883e';
+
+  const images = items.map(item => {{
+    const c = item.querySelector('canvas');
+    return item._rgbaB64 || c.toDataURL('image/png');
+  }});
+
+  try {{
+    const resp = await fetch('/comfyui_batch', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{images, comfyui_url: comfyUrl, api_key: apiKey}})
+    }});
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    statusEl.textContent = 'Batch sent \u2713 (' + items.length + ' images, id: ' + data.prompt_id.slice(0,8) + '\u2026)';
+    statusEl.style.color = '#3fb950';
+  }} catch(e) {{
+    statusEl.textContent = 'Batch error: ' + e.message;
+    statusEl.style.color = '#f85149';
+  }}
+}}
+
+async function removeAllBg() {{
+  const bgBtns = document.querySelectorAll('.bg-btn');
+  for (const btn of bgBtns) {{
+    btn.click();
+    await new Promise(r => setTimeout(r, 800));
+  }}
+}}
+
+async function sendCropToComfyUI(b64DataUrl, statusEl, resultEl) {{
+  const comfyUrl = (document.getElementById('comfyUrl').value || 'http://localhost:8188').replace(/[/]+$/, '');
+  statusEl.textContent = 'Sending\u2026';
+  statusEl.style.color = '#f0883e';
+  resultEl.innerHTML = '';
+  try {{
+    const resp = await fetch('/comfyui_run', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        base64: b64DataUrl,
+        comfyui_url: comfyUrl,
+        api_key: document.getElementById('comfyApiKey').value
+      }})
+    }});
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    if (data.image_b64) {{
+      const img = document.createElement('img');
+      img.src = 'data:image/png;base64,' + data.image_b64;
+      resultEl.appendChild(img);
+      statusEl.textContent = 'Done \u2713';
+      statusEl.style.color = '#3fb950';
+    }} else {{
+      statusEl.textContent = 'No output';
+      statusEl.style.color = '#8b949e';
+    }}
+  }} catch(e) {{
+    statusEl.textContent = e.message;
+    statusEl.style.color = '#f85149';
+  }}
+}}
+
+async function sendAllToComfyUI() {{
+  const btns = document.querySelectorAll('.comfy-btn');
+  for (const btn of btns) {{
+    btn.click();
+    await new Promise(r => setTimeout(r, 300));
+  }}
 }}
 
 ['minArea', 'maxArea'].forEach(id => {{

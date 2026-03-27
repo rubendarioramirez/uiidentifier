@@ -6,14 +6,58 @@ Upload any image in the browser → Python runs the pipeline → interactive exp
 Usage: python3 contour_app.py
 Then open http://localhost:8765
 """
+import base64
 import http.server
 import json
 import os
 import tempfile
+import time
 import urllib.parse
+import urllib.request
 from generate_explorer import run_pipeline, generate_html
 
+# Pre-load rembg session once at startup (u2netp = fast lightweight model)
+print("Loading BG removal model (u2netp)...", flush=True)
+try:
+    from rembg import new_session, remove as rembg_remove
+    _REMBG_SESSION = new_session("u2netp")
+    print("BG removal model ready.", flush=True)
+except Exception as e:
+    _REMBG_SESSION = None
+    print(f"BG removal unavailable: {e}", flush=True)
+
 PORT = 8765
+
+# The ComfyUI workflow. Node "1733" is the LoadImage entry point —
+# its image input is replaced at runtime with the uploaded filename(s).
+BASE_WORKFLOW = {
+    "1733": {"inputs": {"image": ""}, "class_type": "LoadImage"},
+    "1735": {"inputs": {"mask": ["1733", 1]}, "class_type": "InvertMask"},
+    "1740": {"inputs": {"num_columns": 4, "match_image_size": False, "max_resolution": 2048, "images": ["1733", 0]}, "class_type": "ImageConcatFromBatch"},
+    "1741": {"inputs": {"columns": 4, "rows": ["1745", 0], "image": ["1732:8", 0]}, "class_type": "ImageGridtoBatch"},
+    "1742": {"inputs": {"image": ["1741", 0], "alpha": ["1735", 0]}, "class_type": "JoinImageWithAlpha"},
+    "1743": {"inputs": {"images": ["1742", 0]}, "class_type": "PreviewImage"},
+    "1744": {"inputs": {"images": ["1733", 0]}, "class_type": "JWImageBatchCount"},
+    "1745": {"inputs": {"int1": ["1744", 0], "int2": 4}, "class_type": "Basic data handling: IntDivide"},
+    "1732:75":  {"inputs": {"strength": 1, "model": ["1732:66", 0]}, "class_type": "CFGNorm"},
+    "1732:39":  {"inputs": {"vae_name": "qwen_image_vae.safetensors"}, "class_type": "VAELoader"},
+    "1732:38":  {"inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default"}, "class_type": "CLIPLoader"},
+    "1732:37":  {"inputs": {"unet_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors", "weight_dtype": "default"}, "class_type": "UNETLoader"},
+    "1732:66":  {"inputs": {"shift": 3, "model": ["1732:89", 0]}, "class_type": "ModelSamplingAuraFlow"},
+    "1732:8":   {"inputs": {"samples": ["1732:3", 0], "vae": ["1732:39", 0]}, "class_type": "VAEDecode"},
+    "1732:89":  {"inputs": {"lora_name": "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors", "strength_model": 1, "model": ["1732:37", 0]}, "class_type": "LoraLoaderModelOnly"},
+    "1732:110": {"inputs": {"prompt": "", "clip": ["1732:38", 0], "vae": ["1732:39", 0], "image1": ["1740", 0]}, "class_type": "TextEncodeQwenImageEditPlus"},
+    "1732:111": {"inputs": {"prompt": "Imagine these are all icons for a mobile videogame. Colour them in a cohesive, consistent, modern palette. Cyberpunk style. Black background", "clip": ["1732:38", 0], "vae": ["1732:39", 0], "image1": ["1740", 0]}, "class_type": "TextEncodeQwenImageEditPlus"},
+    "1732:1491": {"inputs": {"conditioning": ["1732:111", 0], "latent": ["1732:1729", 0]}, "class_type": "ReferenceLatent"},
+    "1732:1493": {"inputs": {"image": ["1740", 0]}, "class_type": "GetImageSize"},
+    "1732:1490": {"inputs": {"conditioning": ["1732:110", 0], "latent": ["1732:1729", 0]}, "class_type": "ReferenceLatent"},
+    "1732:88":   {"inputs": {"pixels": ["1740", 0], "vae": ["1732:39", 0]}, "class_type": "VAEEncode"},
+    "1732:1729": {"inputs": {"noise_seed": 162164980917793, "noise_strength": 1, "latent": ["1732:88", 0]}, "class_type": "InjectLatentNoise+"},
+    "1732:1492": {"inputs": {"width": ["1732:1493", 0], "height": ["1732:1493", 1], "batch_size": 1}, "class_type": "EmptySD3LatentImage"},
+    "1732:3":    {"inputs": {"seed": 132915428671405, "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1, "model": ["1732:75", 0], "positive": ["1732:1491", 0], "negative": ["1732:1490", 0], "latent_image": ["1732:1730", 0]}, "class_type": "KSampler"},
+    "1732:1731": {"inputs": {"confidence_threshold": 0.2, "text_prompt": "", "max_detections": -1, "offload_model": False}, "class_type": "SAM3Grounding"},
+    "1732:1730": {"inputs": {"noise_seed": 344407510921686, "noise_strength": 1, "latent": ["1732:1492", 0]}, "class_type": "InjectLatentNoise+"},
+}
 
 UPLOAD_PAGE = '''<!DOCTYPE html>
 <html lang="en">
@@ -107,10 +151,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(UPLOAD_PAGE.encode())
 
     def do_POST(self):
-        if self.path != '/process':
+        if self.path == '/process':
+            self._handle_process()
+        elif self.path == '/comfyui_run':
+            self._handle_comfyui_run()
+        elif self.path == '/comfyui_batch':
+            self._handle_comfyui_batch()
+        elif self.path == '/remove_bg':
+            self._handle_remove_bg()
+        else:
             self.send_error(404)
-            return
 
+    def _handle_process(self):
         # Parse multipart form data
         content_type = self.headers.get('Content-Type', '')
         if 'multipart/form-data' not in content_type:
@@ -166,6 +218,282 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(html.encode())
         finally:
             os.unlink(tmp_path)
+
+    def _handle_comfyui_run(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_length))
+
+        b64_data = body.get('base64', '')
+        comfyui_url = body.get('comfyui_url', 'http://localhost:8188').rstrip('/')
+        api_key = body.get('api_key', '')
+        print(f"  url={comfyui_url} key={'SET('+str(len(api_key))+'chars)' if api_key else 'EMPTY'}", flush=True)
+
+        # Strip data URL prefix (data:image/png;base64,...)
+        if ',' in b64_data:
+            b64_data = b64_data.split(',', 1)[1]
+
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['X-API-Key'] = api_key
+        auth_headers = {k: v for k, v in headers.items() if k != 'Content-Type'}
+
+        try:
+            # Upload image to ComfyUI, get back the filename
+            img_bytes = base64.b64decode(b64_data)
+            filename = self._upload_image(comfyui_url, auth_headers, img_bytes)
+            print(f"  Uploaded as: {filename}", flush=True)
+
+            # Build workflow — set the uploaded filename in node 1733 (LoadImage)
+            import copy
+            workflow = copy.deepcopy(BASE_WORKFLOW)
+            workflow["1733"]["inputs"]["image"] = filename
+
+            prompt_payload = json.dumps({"prompt": workflow}).encode()
+            req = urllib.request.Request(
+                comfyui_url + '/api/prompt',
+                data=prompt_payload,
+                headers=headers,
+                method='POST'
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    result = json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode('utf-8', errors='replace')
+                raise ValueError(f'HTTP {e.code} from /api/prompt: {err_body[:300]}')
+
+            prompt_id = result.get('prompt_id')
+            if not prompt_id:
+                raise ValueError('No prompt_id in response: ' + str(result))
+
+            print(f"  ComfyUI prompt_id: {prompt_id}")
+
+            # Poll /history until complete (max 30s)
+            image_b64 = None
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                time.sleep(0.5)
+                try:
+                    hist_req = urllib.request.Request(
+                        comfyui_url + '/api/history/' + prompt_id,
+                        headers=headers
+                    )
+                    with urllib.request.urlopen(hist_req, timeout=5) as resp:
+                        hist = json.loads(resp.read())
+                except Exception:
+                    continue
+
+                if prompt_id not in hist:
+                    continue
+                entry = hist[prompt_id]
+                if not entry.get('status', {}).get('completed'):
+                    continue
+
+                # Grab the first image output found
+                for node_out in entry.get('outputs', {}).values():
+                    for img_info in node_out.get('images', []):
+                        img_url = (comfyui_url + '/api/view?filename=' +
+                                   urllib.parse.quote(img_info['filename']) +
+                                   '&type=' + img_info.get('type', 'output'))
+                        if img_info.get('subfolder'):
+                            img_url += '&subfolder=' + urllib.parse.quote(img_info['subfolder'])
+                        img_req = urllib.request.Request(img_url, headers=headers)
+                        with urllib.request.urlopen(img_req, timeout=5) as img_resp:
+                            image_b64 = base64.b64encode(img_resp.read()).decode()
+                        break
+                    if image_b64:
+                        break
+                break
+
+            response = {'prompt_id': prompt_id, 'image_b64': image_b64}
+
+        except Exception as e:
+            print(f"  ComfyUI error: {e}")
+            response = {'error': str(e)}
+
+        resp_bytes = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(resp_bytes)
+
+    def _upload_image(self, comfyui_url, auth_headers, img_bytes, filename='crop.png'):
+        boundary = b'----CropBoundary'
+        body_parts = (
+            b'--' + boundary + b'\r\n'
+            b'Content-Disposition: form-data; name="image"; filename="' + filename.encode() + b'"\r\n'
+            b'Content-Type: image/png\r\n\r\n' +
+            img_bytes + b'\r\n' +
+            b'--' + boundary + b'--\r\n'
+        )
+        req = urllib.request.Request(
+            comfyui_url + '/api/upload/image',
+            data=body_parts,
+            headers={**auth_headers, 'Content-Type': f'multipart/form-data; boundary={boundary.decode()}'},
+            method='POST'
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode('utf-8', errors='replace')
+            raise ValueError(f'Upload failed HTTP {e.code}: {err_body[:300]}')
+        return result.get('name', result.get('filename', filename))
+
+    def _build_batch_workflow(self, filenames):
+        """Take BASE_WORKFLOW, replace node 1733 with a LoadImage+ImageBatch chain,
+        and patch all references to ["1733", 0] (images) and ["1733", 1] (masks)."""
+        import copy
+        workflow = copy.deepcopy(BASE_WORKFLOW)
+        del workflow["1733"]
+
+        # LoadImage nodes: IDs 10, 11, 12, ...
+        for i, fname in enumerate(filenames):
+            workflow[str(10 + i)] = {"inputs": {"image": fname}, "class_type": "LoadImage"}
+
+        if len(filenames) == 1:
+            img_out  = ["10", 0]
+            mask_out = ["10", 1]
+        else:
+            # IMAGE batch chain: nodes 20, 21, ...
+            workflow["20"] = {"inputs": {"image1": ["10", 0], "image2": ["11", 0]}, "class_type": "ImageBatch"}
+            for i in range(2, len(filenames)):
+                workflow[str(20 + i - 1)] = {
+                    "inputs": {"image1": [str(20 + i - 2), 0], "image2": [str(10 + i), 0]},
+                    "class_type": "ImageBatch"
+                }
+            img_out = [str(20 + len(filenames) - 2), 0]
+
+            # MASK batch chain: nodes 40, 41, ...
+            workflow["40"] = {"inputs": {"image1": ["10", 1], "image2": ["11", 1]}, "class_type": "ImageBatch"}
+            for i in range(2, len(filenames)):
+                workflow[str(40 + i - 1)] = {
+                    "inputs": {"image1": [str(40 + i - 2), 0], "image2": [str(10 + i), 1]},
+                    "class_type": "ImageBatch"
+                }
+            mask_out = [str(40 + len(filenames) - 2), 0]
+
+        # Patch all references to ["1733", 0] → img_out, ["1733", 1] → mask_out
+        for node in workflow.values():
+            for key, val in node.get("inputs", {}).items():
+                if isinstance(val, list) and len(val) == 2 and val[0] == "1733":
+                    node["inputs"][key] = img_out if val[1] == 0 else mask_out
+
+        return workflow
+
+    def _handle_comfyui_batch(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_length))
+
+        images_b64 = body.get('images', [])
+        comfyui_url = body.get('comfyui_url', 'http://localhost:8188').rstrip('/')
+        api_key = body.get('api_key', '')
+        print(f"  Batch: {len(images_b64)} images, key={'SET' if api_key else 'EMPTY'}", flush=True)
+
+        auth_headers = {}
+        if api_key:
+            auth_headers['X-API-Key'] = api_key
+        headers = {**auth_headers, 'Content-Type': 'application/json'}
+
+        try:
+            # Upload all images
+            filenames = []
+            for i, b64_data in enumerate(images_b64):
+                if ',' in b64_data:
+                    b64_data = b64_data.split(',', 1)[1]
+                img_bytes = base64.b64decode(b64_data)
+                fname = self._upload_image(comfyui_url, auth_headers, img_bytes, f'crop_{i}.png')
+                filenames.append(fname)
+                print(f"  Uploaded [{i+1}/{len(images_b64)}]: {fname}", flush=True)
+
+            workflow = self._build_batch_workflow(filenames)
+
+            # Submit
+            prompt_payload = json.dumps({"prompt": workflow}).encode()
+            req = urllib.request.Request(
+                comfyui_url + '/api/prompt',
+                data=prompt_payload,
+                headers=headers,
+                method='POST'
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    result = json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode('utf-8', errors='replace')
+                raise ValueError(f'HTTP {e.code} from /api/prompt: {err_body[:300]}')
+
+            prompt_id = result.get('prompt_id')
+            if not prompt_id:
+                raise ValueError('No prompt_id: ' + str(result))
+            print(f"  Batch prompt_id: {prompt_id}", flush=True)
+
+            # Poll history
+            image_b64 = None
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                time.sleep(0.5)
+                try:
+                    hist_req = urllib.request.Request(
+                        comfyui_url + '/api/history/' + prompt_id, headers=headers)
+                    with urllib.request.urlopen(hist_req, timeout=5) as resp:
+                        hist = json.loads(resp.read())
+                except Exception:
+                    continue
+                if prompt_id not in hist:
+                    continue
+                entry = hist[prompt_id]
+                if not entry.get('status', {}).get('completed'):
+                    continue
+                for node_out in entry.get('outputs', {}).values():
+                    for img_info in node_out.get('images', []):
+                        img_url = (comfyui_url + '/api/view?filename=' +
+                                   urllib.parse.quote(img_info['filename']) +
+                                   '&type=' + img_info.get('type', 'output'))
+                        if img_info.get('subfolder'):
+                            img_url += '&subfolder=' + urllib.parse.quote(img_info['subfolder'])
+                        img_req = urllib.request.Request(img_url, headers=headers)
+                        with urllib.request.urlopen(img_req, timeout=5) as img_resp:
+                            image_b64 = base64.b64encode(img_resp.read()).decode()
+                        break
+                    if image_b64:
+                        break
+                break
+
+            response = {'prompt_id': prompt_id, 'image_b64': image_b64}
+
+        except Exception as e:
+            print(f"  Batch error: {e}", flush=True)
+            response = {'error': str(e)}
+
+        resp_bytes = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(resp_bytes)
+
+    def _handle_remove_bg(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_length))
+        b64_data = body.get('base64', '')
+        if ',' in b64_data:
+            b64_data = b64_data.split(',', 1)[1]
+        try:
+            if _REMBG_SESSION is None:
+                raise RuntimeError("BG removal model failed to load at startup")
+            img_bytes = base64.b64decode(b64_data)
+            t0 = time.time()
+            result_bytes = rembg_remove(img_bytes, session=_REMBG_SESSION)
+            print(f"  BG removed in {time.time()-t0:.1f}s: {len(img_bytes)//1024}KB → {len(result_bytes)//1024}KB", flush=True)
+            response = {'image_b64': base64.b64encode(result_bytes).decode()}
+        except Exception as e:
+            print(f"  BG removal error: {e}", flush=True)
+            response = {'error': str(e)}
+        resp_bytes = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(resp_bytes)
 
     def log_message(self, format, *args):
         print(f"  {args[0]}")
