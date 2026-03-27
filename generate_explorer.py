@@ -148,6 +148,14 @@ def generate_html(data, image_name="uploaded image"):
   .comfy-result img {{ max-width: 120px; max-height: 120px; border-radius: 4px; margin-top: 4px; display: block; }}
   .crop-checkbox {{ position: absolute; top: 4px; left: 4px; width: 16px; height: 16px; cursor: pointer; accent-color: #ffa657; }}
   .crop-item {{ position: relative; }}
+  .workflow-panel {{ max-width: 1200px; margin: 0 auto 12px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }}
+  .workflow-toggle {{ width: 100%; background: none; border: none; color: #8b949e; font-size: 0.85em; padding: 8px 16px; text-align: left; cursor: pointer; display: flex; align-items: center; gap: 6px; }}
+  .workflow-toggle:hover {{ color: #e6edf3; background: #1c2333; }}
+  .workflow-body {{ display: none; padding: 12px 16px; border-top: 1px solid #30363d; }}
+  .workflow-body.open {{ display: block; }}
+  .workflow-body textarea {{ width: 100%; height: 180px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #e6edf3; font-family: monospace; font-size: 0.75em; padding: 8px; resize: vertical; }}
+  .workflow-body .wf-actions {{ display: flex; gap: 8px; margin-top: 8px; align-items: center; }}
+  .workflow-body .wf-status {{ font-size: 0.8em; color: #8b949e; }}
 
   #info {{
     position: fixed; bottom: 16px; right: 16px; background: #161b22ee; border: 1px solid #30363d;
@@ -197,6 +205,23 @@ def generate_html(data, image_name="uploaded image"):
   <div class="panel">
     <h2>Original image</h2>
     <canvas id="origCanvas" width="{canvas_w}" height="{canvas_h}"></canvas>
+  </div>
+</div>
+
+<div class="workflow-panel">
+  <button class="workflow-toggle" onclick="toggleWorkflow()">
+    <span id="wfArrow">&rsaquo;</span> ComfyUI Workflow JSON
+    <span id="wfNodeHint" style="margin-left:auto;color:#58a6ff;font-size:0.8em;"></span>
+  </button>
+  <div class="workflow-body" id="workflowBody">
+    <textarea id="workflowJson" placeholder="Paste your ComfyUI workflow JSON here. Node &quot;1733&quot; (LoadImage) will receive the uploaded image."></textarea>
+    <div class="wf-actions">
+      <button onclick="loadWorkflowFromFile()" style="color:#58a6ff;">Load JSON file</button>
+      <button onclick="applyWorkflow()" style="color:#3fb950;">Apply</button>
+      <button onclick="clearWorkflow()" style="color:#f85149;">Clear</button>
+      <input type="file" id="wfFileInput" accept=".json" style="display:none" onchange="readWorkflowFile(event)">
+      <span class="wf-status" id="wfStatus"></span>
+    </div>
   </div>
 </div>
 
@@ -589,6 +614,56 @@ async function removeCropBg(item, cropCanvas, statusEl) {{
   }}
 }}
 
+// ── Workflow editor ──────────────────────────────────────────────────────────
+let _customWorkflow = null;
+
+function toggleWorkflow() {{
+  const body = document.getElementById('workflowBody');
+  const arrow = document.getElementById('wfArrow');
+  const open = body.classList.toggle('open');
+  arrow.textContent = open ? '\u2039' : '\u203a';
+}}
+
+function applyWorkflow() {{
+  const raw = document.getElementById('workflowJson').value.trim();
+  const statusEl = document.getElementById('wfStatus');
+  if (!raw) {{ _customWorkflow = null; statusEl.textContent = 'Cleared.'; document.getElementById('wfNodeHint').textContent = ''; return; }}
+  try {{
+    _customWorkflow = JSON.parse(raw);
+    const nodeCount = Object.keys(_customWorkflow).length;
+    statusEl.textContent = '\u2713 Loaded (' + nodeCount + ' nodes)';
+    statusEl.style.color = '#3fb950';
+    document.getElementById('wfNodeHint').textContent = nodeCount + ' nodes';
+  }} catch(e) {{
+    statusEl.textContent = 'Invalid JSON: ' + e.message;
+    statusEl.style.color = '#f85149';
+    _customWorkflow = null;
+  }}
+}}
+
+function clearWorkflow() {{
+  _customWorkflow = null;
+  document.getElementById('workflowJson').value = '';
+  document.getElementById('wfStatus').textContent = 'Using server default.';
+  document.getElementById('wfStatus').style.color = '#8b949e';
+  document.getElementById('wfNodeHint').textContent = '';
+}}
+
+function loadWorkflowFromFile() {{ document.getElementById('wfFileInput').click(); }}
+
+function readWorkflowFile(e) {{
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {{
+    document.getElementById('workflowJson').value = ev.target.result;
+    applyWorkflow();
+  }};
+  reader.readAsText(file);
+  e.target.value = '';
+}}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function toggleSelectAll() {{
   const checkboxes = document.querySelectorAll('.crop-checkbox');
   const anyUnchecked = [...checkboxes].some(c => !c.checked);
@@ -627,7 +702,7 @@ async function sendBatchToComfyUI() {{
     const resp = await fetch('/comfyui_batch', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{images, comfyui_url: comfyUrl, api_key: apiKey}})
+      body: JSON.stringify({{images, comfyui_url: comfyUrl, api_key: apiKey, workflow: _customWorkflow}})
     }});
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
@@ -659,7 +734,8 @@ async function sendCropToComfyUI(b64DataUrl, statusEl, resultEl) {{
       body: JSON.stringify({{
         base64: b64DataUrl,
         comfyui_url: comfyUrl,
-        api_key: document.getElementById('comfyApiKey').value
+        api_key: document.getElementById('comfyApiKey').value,
+        workflow: _customWorkflow
       }})
     }});
     const data = await resp.json();

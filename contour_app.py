@@ -227,7 +227,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         b64_data = body.get('base64', '')
         comfyui_url = body.get('comfyui_url', 'http://localhost:8188').rstrip('/')
         api_key = body.get('api_key', '')
-        print(f"  url={comfyui_url} key={'SET('+str(len(api_key))+'chars)' if api_key else 'EMPTY'}", flush=True)
+        custom_workflow = body.get('workflow')
+        print(f"  url={comfyui_url} key={'SET('+str(len(api_key))+'chars)' if api_key else 'EMPTY'} workflow={'custom' if custom_workflow else 'default'}", flush=True)
 
         # Strip data URL prefix (data:image/png;base64,...)
         if ',' in b64_data:
@@ -244,9 +245,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             filename = self._upload_image(comfyui_url, auth_headers, img_bytes)
             print(f"  Uploaded as: {filename}", flush=True)
 
-            # Build workflow — set the uploaded filename in node 1733 (LoadImage)
+            # Build workflow — use custom if provided, else BASE_WORKFLOW
             import copy
-            workflow = copy.deepcopy(BASE_WORKFLOW)
+            workflow = copy.deepcopy(custom_workflow if custom_workflow else BASE_WORKFLOW)
             workflow["1733"]["inputs"]["image"] = filename
 
             prompt_payload = json.dumps({"prompt": workflow}).encode()
@@ -341,11 +342,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ValueError(f'Upload failed HTTP {e.code}: {err_body[:300]}')
         return result.get('name', result.get('filename', filename))
 
-    def _build_batch_workflow(self, filenames):
+    def _build_batch_workflow(self, filenames, custom_workflow=None):
         """Take BASE_WORKFLOW, replace node 1733 with a LoadImage+ImageBatch chain,
         and patch all references to ["1733", 0] (images) and ["1733", 1] (masks)."""
         import copy
-        workflow = copy.deepcopy(BASE_WORKFLOW)
+        workflow = copy.deepcopy(custom_workflow if custom_workflow else BASE_WORKFLOW)
         del workflow["1733"]
 
         # LoadImage nodes: IDs 10, 11, 12, ...
@@ -401,7 +402,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         images_b64 = body.get('images', [])
         comfyui_url = body.get('comfyui_url', 'http://localhost:8188').rstrip('/')
         api_key = body.get('api_key', '')
-        print(f"  Batch: {len(images_b64)} images, key={'SET' if api_key else 'EMPTY'}", flush=True)
+        custom_workflow = body.get('workflow')
+        print(f"  Batch: {len(images_b64)} images, key={'SET' if api_key else 'EMPTY'} workflow={'custom' if custom_workflow else 'default'}", flush=True)
 
         auth_headers = {}
         if api_key:
@@ -419,7 +421,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 filenames.append(fname)
                 print(f"  Uploaded [{i+1}/{len(images_b64)}]: {fname}", flush=True)
 
-            workflow = self._build_batch_workflow(filenames)
+            workflow = self._build_batch_workflow(filenames, custom_workflow)
 
             # Submit
             prompt_payload = json.dumps({"prompt": workflow}).encode()
