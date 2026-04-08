@@ -16,6 +16,7 @@ import uuid
 import urllib.parse
 import urllib.request
 import websocket
+import cv2
 from generate_explorer import run_pipeline, generate_html
 
 # Pre-load rembg session once at startup (u2netp = fast lightweight model)
@@ -201,6 +202,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_proxy_image()
         elif self.path == '/upload_original':
             self._handle_upload_original()
+        elif self.path == '/detect_ui':
+            self._handle_detect_ui()
         else:
             self.send_error(404)
 
@@ -550,6 +553,138 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             print(f"  BG removal error: {e}", flush=True)
             response = {'error': str(e)}
+        resp_bytes = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(resp_bytes)
+
+    def _render_boxes_on_image(self, img_bytes, boxes, img_w, img_h):
+        """Draw labeled boxes onto image bytes, return new PNG bytes."""
+        import numpy as np
+        img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        for b in boxes:
+            x1, y1 = max(0, b['x']), max(0, b['y'])
+            x2, y2 = min(img_w, b['x'] + b['w']), min(img_h, b['y'] + b['h'])
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 200, 255), 2)
+            cv2.putText(img, b['label'], (x1 + 2, max(y1 + 14, 14)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA)
+        _, out = cv2.imencode('.png', img)
+        return base64.b64encode(out).decode('utf-8')
+
+    def _call_gemini(self, gemini_key, model, contents, tools, tool_config):
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}'
+        payload = json.dumps({'contents': contents, 'tools': tools, 'tool_config': tool_config}).encode()
+        req = urllib.request.Request(url, data=payload,
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            return json.loads(resp.read())
+
+    def _handle_detect_ui(self):
+        """Detect UI elements via Gemini function calling with a self-correction loop."""
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_length))
+        gemini_key = body.get('gemini_key', '')
+        b64_data = body.get('image_b64', '')
+        img_w = body.get('width', 1)
+        img_h = body.get('height', 1)
+        if ',' in b64_data:
+            b64_data = b64_data.split(',', 1)[1]
+
+        model = body.get('model', 'gemini-3.1-pro-preview')
+        max_rounds = 3
+
+        tools = [{'function_declarations': [
+            {
+                'name': 'add_ui_element',
+                'description': 'Mark a UI element bounding box in the screenshot',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {
+                        'label': {'type': 'string', 'description': 'Short name for this UI element'},
+                        'x_min': {'type': 'integer', 'description': f'Left edge px (0–{img_w})'},
+                        'y_min': {'type': 'integer', 'description': f'Top edge px (0–{img_h})'},
+                        'x_max': {'type': 'integer', 'description': f'Right edge px (0–{img_w})'},
+                        'y_max': {'type': 'integer', 'description': f'Bottom edge px (0–{img_h})'},
+                    },
+                    'required': ['label', 'x_min', 'y_min', 'x_max', 'y_max']
+                }
+            },
+            {
+                'name': 'confirm_done',
+                'description': 'Call this when all boxes are correct and no more changes needed',
+                'parameters': {'type': 'object', 'properties': {}, 'required': []}
+            }
+        ]}]
+
+        try:
+            boxes = []
+            img_bytes = base64.b64decode(b64_data)
+
+            for round_num in range(max_rounds):
+                if round_num == 0:
+                    # First round: detect from original
+                    prompt = (
+                        f'This is a mobile game screenshot ({img_w}x{img_h} px). '
+                        'Call add_ui_element() for EVERY UI element — buttons, icons, HUD, timers, '
+                        'score cards, badges. Do NOT include the game world/background. '
+                        'x=0 is LEFT, y=0 is TOP. Be precise to the element borders.'
+                    )
+                    contents = [{'parts': [
+                        {'text': prompt},
+                        {'inline_data': {'mime_type': 'image/png', 'data': b64_data}}
+                    ]}]
+                    tool_config = {'function_calling_config': {'mode': 'ANY', 'allowed_function_names': ['add_ui_element']}}
+                else:
+                    # Correction round: send annotated image, ask to fix
+                    annotated_b64 = self._render_boxes_on_image(img_bytes, boxes, img_w, img_h)
+                    prompt = (
+                        f'Round {round_num+1}: I have drawn your detected boxes on the image. '
+                        'Blue rectangles show what you marked. '
+                        'Please review carefully: are all UI elements correctly boxed? '
+                        'Call add_ui_element() again for ALL elements with corrected coordinates '
+                        '(replace the full list, not just changes). '
+                        'If everything looks correct, call confirm_done() instead.'
+                    )
+                    contents = [{'parts': [
+                        {'text': prompt},
+                        {'inline_data': {'mime_type': 'image/png', 'data': annotated_b64}}
+                    ]}]
+                    tool_config = {'function_calling_config': {'mode': 'ANY'}}
+
+                print(f"  Gemini round {round_num+1}/{max_rounds}...", flush=True)
+                result = self._call_gemini(gemini_key, model, contents, tools, tool_config)
+
+                new_boxes = []
+                confirmed = False
+                for part in result['candidates'][0]['content']['parts']:
+                    fc = part.get('functionCall')
+                    if not fc:
+                        continue
+                    if fc['name'] == 'confirm_done':
+                        confirmed = True
+                    elif fc['name'] == 'add_ui_element':
+                        a = fc['args']
+                        x1, y1 = int(a['x_min']), int(a['y_min'])
+                        x2, y2 = int(a['x_max']), int(a['y_max'])
+                        new_boxes.append({'label': a.get('label', ''), 'x': x1, 'y': y1, 'w': x2 - x1, 'h': y2 - y1})
+
+                if new_boxes:
+                    boxes = new_boxes
+                    print(f"    → {len(boxes)} elements", flush=True)
+                    for b in boxes:
+                        print(f"      {b['label']}: ({b['x']},{b['y']}) {b['w']}x{b['h']}", flush=True)
+
+                if confirmed:
+                    print(f"  Gemini confirmed done at round {round_num+1}", flush=True)
+                    break
+
+            response = {'boxes': boxes}
+        except Exception as e:
+            print(f"  Gemini detect error: {e}", flush=True)
+            response = {'error': str(e)}
+
         resp_bytes = json.dumps(response).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')

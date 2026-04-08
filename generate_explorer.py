@@ -252,6 +252,10 @@ def generate_html(data, image_name="uploaded image"):
 <div class="crops-section">
   <h2>Cropped Icons from Original (<span id="cropCount">0</span> cuts)</h2>
   <div class="comfy-config">
+    <label>Gemini Key:</label>
+    <input type="password" id="geminiKey" placeholder="AIza..." style="width:160px;">
+    <button onclick="detectUIWithAI()" style="color:#c9d1d9;background:#388bfd22;border-color:#388bfd;">&#x1F916; Detect UI</button>
+    <span id="aiStatus" style="font-size:0.8em;color:#8b949e;margin-right:16px;"></span>
     <label>ComfyUI URL:</label>
     <input type="text" id="comfyUrl" value="https://cloud.comfy.org">
     <label>API Key:</label>
@@ -288,6 +292,7 @@ const maskPreviewCanvas = document.getElementById('maskCanvas');
 const maskPreviewCtx = maskPreviewCanvas.getContext('2d');
 let _modCount = 0;
 let _currentGroups = [];
+let _aiBoxes = [];
 const scaleX = {canvas_w} / DATA.width;
 const scaleY = {canvas_h} / DATA.height;
 
@@ -466,6 +471,19 @@ function draw() {{
     (onlyParents ? ' — outermost only' : '');
 
   drawROI();
+  // Draw AI-detected boxes as blue outlines
+  if (_aiBoxes.length > 0) {{
+    ctx.save();
+    ctx.strokeStyle = '#388bfd';
+    ctx.lineWidth = 2;
+    ctx.font = 'bold 10px sans-serif';
+    ctx.fillStyle = '#388bfd';
+    for (const b of _aiBoxes) {{
+      ctx.strokeRect(b.x * scaleX, b.y * scaleY, b.w * scaleX, b.h * scaleY);
+      ctx.fillText(b.label || '', b.x * scaleX + 2, b.y * scaleY + 11);
+    }}
+    ctx.restore();
+  }}
   _currentGroups = groups;
   drawMaskPreview(groups);
   generateCrops(groups);
@@ -755,6 +773,105 @@ function generateMaskCanvas() {{
     }}
   }}
   return mc.toDataURL('image/png');
+}}
+
+async function detectUIWithAI() {{
+  const geminiKey = document.getElementById('geminiKey').value.trim();
+  const statusEl = document.getElementById('aiStatus');
+  if (!geminiKey) {{ statusEl.textContent = 'Enter Gemini key first'; statusEl.style.color = '#f85149'; return; }}
+  statusEl.textContent = 'Asking Gemini\u2026'; statusEl.style.color = '#f0883e';
+
+  try {{
+    const resp = await fetch('/detect_ui', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        gemini_key: geminiKey,
+        image_b64: IMG_B64,
+        width: DATA.width,
+        height: DATA.height
+      }})
+    }});
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+
+    const boxes = data.boxes || [];
+    statusEl.textContent = `Gemini found ${{boxes.length}} UI elements`;
+    statusEl.style.color = '#3fb950';
+
+    // Store boxes and redraw contour canvas with overlaid boxes
+    _aiBoxes = boxes;
+    draw();
+
+    // Generate crops directly from Gemini boxes (bypass contour system)
+    const grid = document.getElementById('cropsGrid');
+    grid.innerHTML = '';
+    let count = 0;
+    boxes.forEach((b, i) => {{
+      const cropX = Math.max(0, b.x);
+      const cropY = Math.max(0, b.y);
+      const cropW = Math.min(DATA.width - cropX, b.w);
+      const cropH = Math.min(DATA.height - cropY, b.h);
+      if (cropW < 5 || cropH < 5) return;
+
+      const cropData = fullCtx.getImageData(cropX, cropY, cropW, cropH);
+      const maxSize = 120;
+      const displayScale = Math.min(maxSize / cropW, maxSize / cropH, 1);
+      const dw = Math.round(cropW * displayScale), dh = Math.round(cropH * displayScale);
+
+      const cropCanvas = document.createElement('canvas');
+      cropCanvas.width = dw; cropCanvas.height = dh;
+      const tmp = document.createElement('canvas');
+      tmp.width = cropW; tmp.height = cropH;
+      tmp.getContext('2d').putImageData(cropData, 0, 0);
+      cropCanvas.getContext('2d').drawImage(tmp, 0, 0, dw, dh);
+
+      const item = document.createElement('div');
+      item.className = 'crop-item';
+      item.style.borderColor = '#388bfd';
+      item.appendChild(cropCanvas);
+
+      const lbl = document.createElement('div');
+      lbl.className = 'crop-label';
+      lbl.textContent = (b.label || 'ui') + ' (' + cropW + '×' + cropH + ')';
+      item.appendChild(lbl);
+
+      item._group = {{ x: cropX, y: cropY, w: cropW, h: cropH, id: 'ai_' + i, members: [], count: 1 }};
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'crop-checkbox';
+      checkbox.checked = true;
+      checkbox.addEventListener('change', () => {{
+        item.style.outline = checkbox.checked ? '2px solid #388bfd' : 'none';
+      }});
+      item.style.outline = '2px solid #388bfd';
+      item.appendChild(checkbox);
+
+      const bgBtn = document.createElement('button');
+      bgBtn.className = 'bg-btn';
+      bgBtn.textContent = 'Remove BG';
+      const comfyStatus = document.createElement('div');
+      comfyStatus.className = 'comfy-status';
+      const comfyResult = document.createElement('div');
+      comfyResult.className = 'comfy-result';
+      bgBtn.addEventListener('click', (function(it, c, s) {{
+        return function() {{ removeCropBg(it, c, s); }};
+      }})(item, cropCanvas, comfyStatus));
+      item.appendChild(bgBtn);
+      item.appendChild(comfyStatus);
+      item.appendChild(comfyResult);
+      grid.appendChild(item);
+      count++;
+    }});
+
+    document.getElementById('cropCount').textContent = count;
+    statusEl.textContent = `Gemini found ${{boxes.length}} UI elements — ${{count}} crops`;
+
+  }} catch(e) {{
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.style.color = '#f85149';
+  }}
 }}
 
 async function sendBatchToComfyUI() {{
