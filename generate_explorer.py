@@ -155,6 +155,22 @@ def generate_html(data, image_name="uploaded image"):
   .workflow-body.open {{ display: block; }}
   .workflow-body textarea {{ width: 100%; height: 180px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #e6edf3; font-family: monospace; font-size: 0.75em; padding: 8px; resize: vertical; }}
   .workflow-body .wf-actions {{ display: flex; gap: 8px; margin-top: 8px; align-items: center; }}
+  #resultsSection {{ max-width: 1600px; margin: 24px auto; padding: 0 16px; display: none; }}
+  #resultsSection h2 {{ font-size: 1em; color: #8b949e; margin-bottom: 12px; }}
+  .results-grid {{ display: flex; flex-wrap: wrap; gap: 16px; }}
+  .result-card {{
+    background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+    overflow: hidden; display: flex; flex-direction: column;
+  }}
+  .result-card img {{ display: block; max-width: 100%; max-height: 480px; object-fit: contain; background: #0d1117; }}
+  .result-card .rc-footer {{
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; font-size: 0.8em; color: #8b949e;
+  }}
+  .result-card .rc-footer a {{
+    color: #58a6ff; text-decoration: none; font-size: 0.85em;
+  }}
+  .result-card .rc-footer a:hover {{ text-decoration: underline; }}
   .workflow-body .wf-status {{ font-size: 0.8em; color: #8b949e; }}
 
   #info {{
@@ -203,6 +219,10 @@ def generate_html(data, image_name="uploaded image"):
     <canvas id="canvas" width="{canvas_w}" height="{canvas_h}"></canvas>
   </div>
   <div class="panel">
+    <h2>Mask preview</h2>
+    <canvas id="maskCanvas" width="{canvas_w}" height="{canvas_h}"></canvas>
+  </div>
+  <div class="panel">
     <h2>Original image</h2>
     <canvas id="origCanvas" width="{canvas_w}" height="{canvas_h}"></canvas>
   </div>
@@ -245,6 +265,11 @@ def generate_html(data, image_name="uploaded image"):
   <div class="crops-grid" id="cropsGrid"></div>
 </div>
 
+<div id="resultsSection">
+  <h2>ComfyUI Results <span id="resultsCount" style="color:#ffa657;"></span></h2>
+  <div class="results-grid" id="resultsGrid"></div>
+</div>
+
 <div id="info">
   <div id="iText"></div>
 </div>
@@ -259,7 +284,10 @@ const origCanvas = document.getElementById('origCanvas');
 const origCtx = origCanvas.getContext('2d');
 const modCanvas = document.getElementById('modCanvas');
 const modCtx = modCanvas.getContext('2d');
+const maskPreviewCanvas = document.getElementById('maskCanvas');
+const maskPreviewCtx = maskPreviewCanvas.getContext('2d');
 let _modCount = 0;
+let _currentGroups = [];
 const scaleX = {canvas_w} / DATA.width;
 const scaleY = {canvas_h} / DATA.height;
 
@@ -438,6 +466,8 @@ function draw() {{
     (onlyParents ? ' — outermost only' : '');
 
   drawROI();
+  _currentGroups = groups;
+  drawMaskPreview(groups);
   generateCrops(groups);
 }}
 
@@ -685,6 +715,48 @@ function toggleSelectAll() {{
   document.getElementById('selectAllBtn').textContent = anyUnchecked ? 'Deselect All' : 'Select All';
 }}
 
+function drawMaskPreview(groups) {{
+  maskPreviewCtx.fillStyle = '#ffffff';
+  maskPreviewCtx.fillRect(0, 0, maskPreviewCanvas.width, maskPreviewCanvas.height);
+  maskPreviewCtx.fillStyle = '#000000';
+  for (const g of groups) {{
+    for (const c of g.members) {{
+      if (c.points.length < 3) continue;
+      maskPreviewCtx.beginPath();
+      maskPreviewCtx.moveTo(c.points[0][0] * scaleX, c.points[0][1] * scaleY);
+      for (let i = 1; i < c.points.length; i++) {{
+        maskPreviewCtx.lineTo(c.points[i][0] * scaleX, c.points[i][1] * scaleY);
+      }}
+      maskPreviewCtx.closePath();
+      maskPreviewCtx.fill();
+    }}
+  }}
+}}
+
+function generateMaskCanvas() {{
+  // Creates a B&W mask: white background, black contour shapes at original image resolution.
+  const mc = document.createElement('canvas');
+  mc.width = DATA.width;
+  mc.height = DATA.height;
+  const mctx = mc.getContext('2d');
+  mctx.fillStyle = '#ffffff';
+  mctx.fillRect(0, 0, mc.width, mc.height);
+  mctx.fillStyle = '#000000';
+  for (const g of _currentGroups) {{
+    for (const c of g.members) {{
+      if (c.points.length < 3) continue;
+      mctx.beginPath();
+      mctx.moveTo(c.points[0][0], c.points[0][1]);
+      for (let i = 1; i < c.points.length; i++) {{
+        mctx.lineTo(c.points[i][0], c.points[i][1]);
+      }}
+      mctx.closePath();
+      mctx.fill();
+    }}
+  }}
+  return mc.toDataURL('image/png');
+}}
+
 async function sendBatchToComfyUI() {{
   const comfyUrl = (document.getElementById('comfyUrl').value || 'http://localhost:8188').replace(/[/]+$/, '');
   const apiKey = document.getElementById('comfyApiKey').value;
@@ -701,7 +773,7 @@ async function sendBatchToComfyUI() {{
     return;
   }}
 
-  statusEl.textContent = 'Uploading ' + items.length + ' crops\u2026';
+  statusEl.textContent = 'Uploading original\u2026';
   statusEl.style.color = '#f0883e';
 
   const images = items.map(item => {{
@@ -710,16 +782,44 @@ async function sendBatchToComfyUI() {{
   }});
 
   try {{
+    // Step 1: upload original screenshot separately (avoids huge JSON payload)
+    const origResp = await fetch('/upload_original', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{base64: IMG_B64, comfyui_url: comfyUrl, api_key: apiKey}})
+    }});
+    const origData = await origResp.json();
+    if (origData.error) throw new Error('Original upload: ' + origData.error);
+    const originalFilename = origData.filename;
+
+    // Step 2: upload B&W mask from contour solid fill
+    statusEl.textContent = 'Uploading mask\u2026';
+    const maskB64 = generateMaskCanvas();
+    const maskResp = await fetch('/upload_original', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{base64: maskB64, comfyui_url: comfyUrl, api_key: apiKey, filename_hint: 'mask.png'}})
+    }});
+    const maskData = await maskResp.json();
+    if (maskData.error) throw new Error('Mask upload: ' + maskData.error);
+    const maskFilename = maskData.filename;
+
+    statusEl.textContent = 'Uploading ' + items.length + ' crops\u2026';
+
+    // Step 3: send batch with original_filename and mask_filename references
     const resp = await fetch('/comfyui_batch', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{images, comfyui_url: comfyUrl, api_key: apiKey, workflow: _customWorkflow}})
+      body: JSON.stringify({{images, original_filename: originalFilename, mask_filename: maskFilename, comfyui_url: comfyUrl, api_key: apiKey, workflow: _customWorkflow}})
     }});
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
     const groups = items.map(it => it._group).filter(Boolean);
-    compositeResultsOnCanvas(data.images || [], groups);
-    statusEl.textContent = 'Batch done \u2713 (' + (data.images || []).length + ' results, id: ' + data.prompt_id.slice(0,8) + '\u2026)';
+    const batchImgs = data.images || [];
+    const nodeIds = data.node_ids || [];
+    applyComfyResultsToCanvas(batchImgs, nodeIds, groups);
+    showComfyResults(batchImgs, nodeIds);
+    statusEl.textContent = 'Batch done \u2713 (' + batchImgs.length + ' results)';
     statusEl.style.color = '#3fb950';
   }} catch(e) {{
     statusEl.textContent = 'Batch error: ' + e.message;
@@ -737,25 +837,42 @@ async function removeAllBg() {{
 
 function compositeResultsOnCanvas(images, groups) {{
   if (!images || images.length === 0) return;
-  let loaded = 0;
   images.forEach(function(b64, i) {{
     if (!groups[i]) return;
     const g = groups[i];
     const img = new Image();
     img.onload = function() {{
-      // Draw result at the crop's scaled position on the modified canvas
       modCtx.drawImage(img,
         Math.round(g.x * scaleX),
         Math.round(g.y * scaleY),
         Math.round(g.w * scaleX),
         Math.round(g.h * scaleY)
       );
-      loaded++;
       _modCount += 1;
       document.getElementById('modCount').textContent = '(' + _modCount + ' results)';
     }};
     img.src = 'data:image/png;base64,' + b64;
   }});
+}}
+
+function applyComfyResultsToCanvas(images, nodeIds, groups) {{
+  // Separate background from icon images by node ID
+  const bgB64 = images[nodeIds.indexOf('1806')] || null;
+  const iconImgs = images.filter((_, i) => nodeIds[i] === '1767');
+  // Icon crops align to the groups in order
+  const iconGroups = groups.slice(0, iconImgs.length);
+
+  if (bgB64) {{
+    const bgImg = new Image();
+    bgImg.onload = function() {{
+      // Fill modCanvas with clean background at original ratio
+      modCtx.drawImage(bgImg, 0, 0, modCanvas.width, modCanvas.height);
+      compositeResultsOnCanvas(iconImgs, iconGroups);
+    }};
+    bgImg.src = 'data:image/png;base64,' + bgB64;
+  }} else {{
+    compositeResultsOnCanvas(iconImgs.length ? iconImgs : images, iconImgs.length ? iconGroups : groups);
+  }}
 }}
 
 async function sendCropToComfyUI(b64DataUrl, statusEl, resultEl) {{
@@ -783,11 +900,11 @@ async function sendCropToComfyUI(b64DataUrl, statusEl, resultEl) {{
       resultEl.appendChild(img);
       statusEl.textContent = 'Done \u2713';
       statusEl.style.color = '#3fb950';
-      // Find the group for this item from the button's parent
       const item = statusEl.closest('.crop-item');
       if (item && item._group) {{
         compositeResultsOnCanvas(imgs, [item._group]);
       }}
+      showComfyResults(imgs, data.node_ids || []);
     }} else {{
       statusEl.textContent = 'No output';
       statusEl.style.color = '#8b949e';
@@ -804,6 +921,101 @@ async function sendAllToComfyUI() {{
     btn.click();
     await new Promise(r => setTimeout(r, 300));
   }}
+}}
+
+async function pollHistory(comfyuiUrl, promptId, statusEl) {{
+  const apiKey = document.getElementById('comfyApiKey').value;
+  const historyUrl = comfyuiUrl.replace(/\/+$/, '') + '/api/history/' + promptId;
+  const deadline = Date.now() + 10 * 60 * 1000; // 10 min
+  let poll = 0;
+  while (Date.now() < deadline) {{
+    await new Promise(r => setTimeout(r, 3000));
+    poll++;
+    try {{
+      const resp = await fetch(historyUrl, {{
+        headers: apiKey ? {{'X-API-Key': apiKey, 'Authorization': 'Bearer ' + apiKey}} : {{}}
+      }});
+      if (!resp.ok) {{
+        if (statusEl && poll % 5 === 0) statusEl.textContent = 'Waiting\u2026 (poll #' + poll + ', ' + resp.status + ')';
+        continue;
+      }}
+      const hist = await resp.json();
+      if (!hist[promptId]) continue;
+      const entry = hist[promptId];
+      const status = entry.status || {{}};
+      if (!status.completed && status.status_str !== 'success') continue;
+      // Collect all output images
+      const images = [];
+      for (const nodeOut of Object.values(entry.outputs || {{}})) {{
+        for (const img of (nodeOut.images || [])) {{
+          if (img.type === 'temp') continue;
+          let viewUrl = comfyuiUrl.replace(/\/+$/, '') + '/api/view?filename=' + encodeURIComponent(img.filename) + '&type=' + (img.type || 'output');
+          if (img.subfolder) viewUrl += '&subfolder=' + encodeURIComponent(img.subfolder);
+          // Fetch via our proxy to avoid CORS
+          const proxyResp = await fetch('/proxy_image', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{url: viewUrl, api_key: apiKey}})
+          }});
+          if (!proxyResp.ok) continue;
+          const pd = await proxyResp.json();
+          if (pd.image_b64) images.push(pd.image_b64);
+        }}
+      }}
+      return images;
+    }} catch(e) {{
+      if (statusEl && poll % 5 === 0) statusEl.textContent = 'Waiting\u2026 (poll #' + poll + ')';
+    }}
+  }}
+  throw new Error('Timed out waiting for ComfyUI result');
+}}
+
+const NODE_LABELS = {{'1767': 'Icons', '1806': 'Background', '1823': 'Environment'}};
+
+function showComfyResults(images, nodeIds) {{
+  if (!images || images.length === 0) return;
+  nodeIds = nodeIds || [];
+  const section = document.getElementById('resultsSection');
+  const grid = document.getElementById('resultsGrid');
+  const countEl = document.getElementById('resultsCount');
+  grid.innerHTML = '';
+  const iconCount = {{}};
+  images.forEach(function(b64, i) {{
+    const nodeId = nodeIds[i] || '';
+    let label = NODE_LABELS[nodeId];
+    if (!label) label = 'Output ' + (i + 1);
+    // Number duplicate labels (e.g. multiple icons)
+    if (nodeId === '1767') {{
+      iconCount[nodeId] = (iconCount[nodeId] || 0) + 1;
+      label = 'Icon ' + iconCount[nodeId];
+    }}
+
+    const card = document.createElement('div');
+    card.className = 'result-card';
+
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + b64;
+
+    const footer = document.createElement('div');
+    footer.className = 'rc-footer';
+
+    const labelEl = document.createElement('span');
+    labelEl.textContent = label;
+
+    const dl = document.createElement('a');
+    dl.textContent = 'Download';
+    dl.href = img.src;
+    dl.download = label.replace(/\s+/g, '_').toLowerCase() + '.png';
+
+    footer.appendChild(labelEl);
+    footer.appendChild(dl);
+    card.appendChild(img);
+    card.appendChild(footer);
+    grid.appendChild(card);
+  }});
+  countEl.textContent = '(' + images.length + ')';
+  section.style.display = 'block';
+  section.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
 }}
 
 ['minArea', 'maxArea'].forEach(id => {{
