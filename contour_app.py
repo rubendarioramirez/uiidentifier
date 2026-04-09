@@ -559,14 +559,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(resp_bytes)
 
-    def _render_boxes_on_image(self, img_bytes, boxes, img_w, img_h):
-        """Draw labeled boxes onto image bytes, return new PNG bytes."""
+    def _render_boxes_on_image(self, img_bytes, boxes, img_w, img_h, max_side=768):
+        """Draw labeled boxes onto image bytes, return resized PNG b64 for correction round."""
         import numpy as np
         img_array = np.frombuffer(img_bytes, dtype=np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        # Scale boxes to match resized image
+        scale = min(max_side / img_w, max_side / img_h, 1.0)
+        if scale < 1.0:
+            img = cv2.resize(img, (int(img_w * scale), int(img_h * scale)))
         for b in boxes:
-            x1, y1 = max(0, b['x']), max(0, b['y'])
-            x2, y2 = min(img_w, b['x'] + b['w']), min(img_h, b['y'] + b['h'])
+            x1 = max(0, int(b['x'] * scale))
+            y1 = max(0, int(b['y'] * scale))
+            x2 = min(img.shape[1], int((b['x'] + b['w']) * scale))
+            y2 = min(img.shape[0], int((b['y'] + b['h']) * scale))
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 200, 255), 2)
             cv2.putText(img, b['label'], (x1 + 2, max(y1 + 14, 14)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA)
@@ -578,7 +584,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         payload = json.dumps({'contents': contents, 'tools': tools, 'tool_config': tool_config}).encode()
         req = urllib.request.Request(url, data=payload,
                                      headers={'Content-Type': 'application/json'}, method='POST')
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read())
 
     def _handle_detect_ui(self):
@@ -589,6 +595,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         b64_data = body.get('image_b64', '')
         img_w = body.get('width', 1)
         img_h = body.get('height', 1)
+        excl = body.get('excluded_zone')  # {x, y, w, h} in original image pixels
         if ',' in b64_data:
             b64_data = b64_data.split(',', 1)[1]
 
@@ -623,13 +630,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             img_bytes = base64.b64decode(b64_data)
 
             for round_num in range(max_rounds):
+                excl_note = ''
+                if excl:
+                    ex, ey, ew, eh = excl['x'], excl['y'], excl['w'], excl['h']
+                    excl_note = (
+                        f' IMPORTANT: ignore everything inside the excluded rectangle '
+                        f'x={ex} y={ey} w={ew} h={eh} (x2={ex+ew}, y2={ey+eh}). '
+                        'Do NOT call add_ui_element() for anything whose center falls inside that area.'
+                    )
                 if round_num == 0:
-                    # First round: detect from original
+                    # First round: detect from contour image
                     prompt = (
-                        f'This is a mobile game screenshot ({img_w}x{img_h} px). '
-                        'Call add_ui_element() for EVERY UI element — buttons, icons, HUD, timers, '
-                        'score cards, badges. Do NOT include the game world/background. '
-                        'x=0 is LEFT, y=0 is TOP. Be precise to the element borders.'
+                        f'This image shows colored contour regions detected in a mobile game UI ({img_w}x{img_h} px). '
+                        'Each colored shape represents a detected UI zone. '
+                        'Call add_ui_element() for each distinct colored region that looks like a UI element '
+                        '— buttons, icons, HUD bars, timers, score cards, badges. '
+                        'Ignore faint/thin lines (those are game world noise, not UI). '
+                        'x=0 is LEFT, y=0 is TOP. Coordinates must be in original image pixels.' +
+                        excl_note
                     )
                     contents = [{'parts': [
                         {'text': prompt},
@@ -640,12 +658,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     # Correction round: send annotated image, ask to fix
                     annotated_b64 = self._render_boxes_on_image(img_bytes, boxes, img_w, img_h)
                     prompt = (
-                        f'Round {round_num+1}: I have drawn your detected boxes on the image. '
-                        'Blue rectangles show what you marked. '
-                        'Please review carefully: are all UI elements correctly boxed? '
-                        'Call add_ui_element() again for ALL elements with corrected coordinates '
-                        '(replace the full list, not just changes). '
-                        'If everything looks correct, call confirm_done() instead.'
+                        f'Round {round_num+1}: Scaled preview with your detected boxes in blue. '
+                        f'Original image is {img_w}x{img_h} px — give all coordinates in original pixel space. '
+                        'Are all UI elements correctly boxed? '
+                        'If yes, call confirm_done(). '
+                        'If any boxes are wrong/missing/misaligned, call add_ui_element() for the FULL corrected list.' +
+                        excl_note
                     )
                     contents = [{'parts': [
                         {'text': prompt},
@@ -678,6 +696,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
                 if confirmed:
                     print(f"  Gemini confirmed done at round {round_num+1}", flush=True)
+                    break
+
+                # Stop after round 1 unless verify mode is enabled
+                if round_num == 0 and boxes and not body.get('verify', False):
+                    print(f"  Round 1 done ({len(boxes)} elements) — verify mode off, stopping", flush=True)
                     break
 
             response = {'boxes': boxes}

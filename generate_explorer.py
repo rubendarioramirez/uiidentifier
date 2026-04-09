@@ -471,14 +471,18 @@ function draw() {{
     (onlyParents ? ' — outermost only' : '');
 
   drawROI();
-  // Draw AI-detected boxes as blue outlines
+  // Draw AI-detected boxes as blue outlines (skip excluded zone)
   if (_aiBoxes.length > 0) {{
+    const roiXai = roi.x / scaleX, roiYai = roi.y / scaleY;
+    const roiWai = roi.w / scaleX, roiHai = roi.h / scaleY;
     ctx.save();
-    ctx.strokeStyle = '#388bfd';
     ctx.lineWidth = 2;
     ctx.font = 'bold 10px sans-serif';
-    ctx.fillStyle = '#388bfd';
     for (const b of _aiBoxes) {{
+      const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      const excluded = cx >= roiXai && cx <= roiXai + roiWai && cy >= roiYai && cy <= roiYai + roiHai;
+      ctx.strokeStyle = excluded ? '#666' : '#388bfd';
+      ctx.fillStyle   = excluded ? '#666' : '#388bfd';
       ctx.strokeRect(b.x * scaleX, b.y * scaleY, b.w * scaleX, b.h * scaleY);
       ctx.fillText(b.label || '', b.x * scaleX + 2, b.y * scaleY + 11);
     }}
@@ -782,14 +786,22 @@ async function detectUIWithAI() {{
   statusEl.textContent = 'Asking Gemini\u2026'; statusEl.style.color = '#f0883e';
 
   try {{
+    // Send the contour canvas (shows detected zones) instead of raw original
+    const contourB64 = canvas.toDataURL('image/png');
+    // Pass excluded zone in image coordinates
+    const exZone = {{
+      x: Math.round(roi.x / scaleX), y: Math.round(roi.y / scaleY),
+      w: Math.round(roi.w / scaleX), h: Math.round(roi.h / scaleY)
+    }};
     const resp = await fetch('/detect_ui', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{
         gemini_key: geminiKey,
-        image_b64: IMG_B64,
+        image_b64: contourB64,
         width: DATA.width,
-        height: DATA.height
+        height: DATA.height,
+        excluded_zone: exZone
       }})
     }});
     const data = await resp.json();
@@ -799,15 +811,37 @@ async function detectUIWithAI() {{
     statusEl.textContent = `Gemini found ${{boxes.length}} UI elements`;
     statusEl.style.color = '#3fb950';
 
-    // Store boxes and redraw contour canvas with overlaid boxes
+    // Draw boxes on original image canvas for accurate visual verification
+    origCtx.drawImage(origImg, 0, 0, origCanvas.width, origCanvas.height);
+    const roiXv = roi.x / scaleX, roiYv = roi.y / scaleY;
+    const roiWv = roi.w / scaleX, roiHv = roi.h / scaleY;
+    origCtx.save();
+    origCtx.lineWidth = 2;
+    origCtx.font = 'bold 10px sans-serif';
+    for (const b of boxes) {{
+      const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      const excluded = cx >= roiXv && cx <= roiXv + roiWv && cy >= roiYv && cy <= roiYv + roiHv;
+      origCtx.strokeStyle = excluded ? 'rgba(150,150,150,0.6)' : '#00e5ff';
+      origCtx.fillStyle   = excluded ? 'rgba(150,150,150,0.6)' : '#00e5ff';
+      origCtx.strokeRect(b.x * scaleX, b.y * scaleY, b.w * scaleX, b.h * scaleY);
+      origCtx.fillText(b.label || '', b.x * scaleX + 2, b.y * scaleY + 11);
+    }}
+    origCtx.restore();
+
+    // Also store for contour canvas overlay
     _aiBoxes = boxes;
     draw();
 
     // Generate crops directly from Gemini boxes (bypass contour system)
+    const roiX = roi.x / scaleX, roiY = roi.y / scaleY;
+    const roiW = roi.w / scaleX, roiH = roi.h / scaleY;
     const grid = document.getElementById('cropsGrid');
     grid.innerHTML = '';
     let count = 0;
     boxes.forEach((b, i) => {{
+      // Skip boxes whose center falls inside the excluded zone
+      const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      if (cx >= roiX && cx <= roiX + roiW && cy >= roiY && cy <= roiY + roiH) return;
       const cropX = Math.max(0, b.x);
       const cropY = Math.max(0, b.y);
       const cropW = Math.min(DATA.width - cropX, b.w);
