@@ -255,6 +255,7 @@ def generate_html(data, image_name="uploaded image"):
     <label>Gemini Key:</label>
     <input type="password" id="geminiKey" placeholder="AIza..." style="width:160px;">
     <button onclick="detectUIWithAI()" style="color:#c9d1d9;background:#388bfd22;border-color:#388bfd;">&#x1F916; Detect UI</button>
+    <button onclick="downloadViewDescriptionJSON()" style="color:#a5d6a7;background:#3fb95022;border-color:#3fb950;">&#x2B07; Download JSON</button>
     <span id="aiStatus" style="font-size:0.8em;color:#8b949e;margin-right:16px;"></span>
     <label>ComfyUI URL:</label>
     <input type="text" id="comfyUrl" value="https://cloud.comfy.org">
@@ -906,6 +907,86 @@ async function detectUIWithAI() {{
     statusEl.textContent = 'Error: ' + e.message;
     statusEl.style.color = '#f85149';
   }}
+}}
+
+function downloadViewDescriptionJSON() {{
+  // Collect checked crop items from the grid
+  const checkedItems = [...document.querySelectorAll('.crop-item')].filter(item => {{
+    const cb = item.querySelector('.crop-checkbox');
+    return cb && cb.checked;
+  }});
+
+  if (checkedItems.length === 0) {{
+    alert('No crops selected. Check at least one crop first.');
+    return;
+  }}
+
+  const imgW = DATA.width, imgH = DATA.height;
+
+  function deriveAnchor(cx, cy) {{
+    // cx/cy are percentage coords with bottom-left origin (y=0 bottom, y=100 top)
+    const vert  = cy > 66 ? 'top'    : cy < 33 ? 'bottom' : 'middle';
+    const horiz = cx < 33 ? 'left'   : cx > 66 ? 'right'  : 'center';
+    if (vert === 'middle' && horiz === 'center') return 'center';
+    if (vert === 'middle') return 'middle-' + horiz;
+    return vert + '-' + horiz;
+  }}
+
+  function deriveType(label) {{
+    const l = (label || '').toLowerCase();
+    if (l.includes('button') || l.includes('btn') || l.includes('cta')) return 'button';
+    if (l.includes('text') || l.includes('label') || l.includes('title') || l.includes('score')) return 'text';
+    if (l.includes('panel') || l.includes('card') || l.includes('container') || l.includes('modal')) return 'container';
+    return 'image';
+  }}
+
+  const elements = [];
+  let sortOrder = 1;
+  const usedIds = {{}};
+
+  checkedItems.forEach(item => {{
+    const g = item._group;
+    if (!g) return;
+
+    // Get label from the crop-label element
+    const lblEl = item.querySelector('.crop-label');
+    const rawLabel = lblEl ? lblEl.textContent.replace(/\s*\(.*\)$/, '').trim() : '';
+
+    const cx = g.x + g.w / 2, cy = g.y + g.h / 2;
+
+    // Percentage coordinates — bottom-left origin
+    const xPct = Math.round(cx / imgW * 10000) / 100;
+    const yPct = Math.round((1 - cy / imgH) * 10000) / 100;
+    const wPct = Math.round(g.w / imgW * 10000) / 100;
+    const hPct = Math.round(g.h / imgH * 10000) / 100;
+
+    const anchor = deriveAnchor(xPct, yPct);
+    const type   = deriveType(rawLabel);
+
+    // Sanitise label into a valid id; deduplicate
+    let baseId = rawLabel.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'element';
+    usedIds[baseId] = (usedIds[baseId] || 0) + 1;
+    const id = usedIds[baseId] > 1 ? baseId + '_' + usedIds[baseId] : baseId;
+
+    const el = {{ id, type, anchor, x: xPct, y: yPct, width: wPct, height: hPct, color: '#FFFFFFFF', sortOrder: sortOrder++ }};
+    if (type === 'button' || type === 'text') el.text = rawLabel;
+    elements.push(el);
+  }});
+
+  const viewDesc = {{
+    orientation: imgH > imgW ? 'portrait' : 'landscape',
+    referenceResolution: {{ width: imgW, height: imgH }},
+    elements
+  }};
+
+  const json = JSON.stringify(viewDesc, null, 2);
+  const blob = new Blob([json], {{ type: 'application/json' }});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'view_description.json';
+  a.click();
+  URL.revokeObjectURL(url);
 }}
 
 async function sendBatchToComfyUI() {{

@@ -581,7 +581,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _call_gemini(self, gemini_key, model, contents, tools, tool_config):
         url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}'
-        payload = json.dumps({'contents': contents, 'tools': tools, 'tool_config': tool_config}).encode()
+        payload = json.dumps({'contents': contents, 'tools': tools, 'tool_config': tool_config,
+                              'generationConfig': {'temperature': 0}}).encode()
         req = urllib.request.Request(url, data=payload,
                                      headers={'Content-Type': 'application/json'}, method='POST')
         with urllib.request.urlopen(req, timeout=120) as resp:
