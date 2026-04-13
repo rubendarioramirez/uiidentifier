@@ -9,6 +9,7 @@ Then open http://localhost:8765
 import base64
 import http.server
 import json
+import math
 import os
 import tempfile
 import time
@@ -17,6 +18,7 @@ import urllib.parse
 import urllib.request
 import websocket
 import cv2
+import numpy as np
 from generate_explorer import run_pipeline, generate_html
 
 # Pre-load rembg session once at startup (u2netp = fast lightweight model)
@@ -418,17 +420,137 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         return workflow
 
+    def _pack_icon_grid(self, images_b64_list, cols=4):
+        """Pack individual crop images into a cols-column grid PNG.
+        Returns (grid_bytes, mask_bytes, count) where mask_bytes is a solid-white PNG
+        of the same dimensions (node 1936 — individual masks, no special treatment)."""
+        imgs = []
+        for b64 in images_b64_list:
+            if ',' in b64:
+                b64 = b64.split(',', 1)[1]
+            arr = np.frombuffer(base64.b64decode(b64), np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is not None:
+                imgs.append(img)
+
+        if not imgs:
+            raise ValueError('No valid images to pack into grid')
+
+        count  = len(imgs)
+        cell_h = max(img.shape[0] for img in imgs)
+        cell_w = max(img.shape[1] for img in imgs)
+        rows   = math.ceil(count / cols)
+
+        grid = np.zeros((rows * cell_h, cols * cell_w, 3), dtype=np.uint8)
+        for i, img in enumerate(imgs):
+            r, c = divmod(i, cols)
+            h, w = img.shape[:2]
+            grid[r * cell_h: r * cell_h + h, c * cell_w: c * cell_w + w] = img
+
+        _, grid_enc = cv2.imencode('.png', grid)
+        mask = np.full_like(grid, 255)
+        _, mask_enc = cv2.imencode('.png', mask)
+        return grid_enc.tobytes(), mask_enc.tobytes(), count
+
+    def _inject_workflow_inputs(self, base_wf, bg_filename, bg_mask_filename,
+                                style_string, icon_count, custom_workflow=None):
+        """Inject fixed inputs by node ID. Icons/masks (1766, 1936) are handled
+        separately by _build_image_batch_chain."""
+        import copy
+        wf = copy.deepcopy(custom_workflow if custom_workflow else base_wf)
+
+        def set_image(node_id, filename):
+            if not filename:
+                return
+            if node_id in wf:
+                wf[node_id]['inputs']['image'] = filename
+                print(f"  Injected image into node {node_id}: {filename}", flush=True)
+            else:
+                print(f"  Warning: node {node_id} not found in workflow", flush=True)
+
+        def set_primitive(node_id, value):
+            if node_id not in wf:
+                print(f"  Warning: node {node_id} not found in workflow", flush=True)
+                return
+            inputs = wf[node_id]['inputs']
+            hints = ['text', 'string', 'replacement', 'value'] if isinstance(value, str) else ['int', 'value', 'number']
+            for key in hints:
+                if key in inputs and not isinstance(inputs[key], list):
+                    inputs[key] = value
+                    print(f"  Injected {type(value).__name__} into node {node_id}[{key}]: {value}", flush=True)
+                    return
+            for key, val in inputs.items():
+                if not isinstance(val, list) and isinstance(val, type(value)):
+                    inputs[key] = value
+                    print(f"  Injected {type(value).__name__} into node {node_id}[{key}] (fallback): {value}", flush=True)
+                    return
+            print(f"  Warning: no suitable field for {type(value).__name__} in node {node_id}", flush=True)
+
+        set_image('1771', bg_filename)
+        set_image('1793', bg_mask_filename)
+        set_primitive('1945', style_string)
+        set_primitive('1947', style_string)
+        set_primitive('1934', icon_count)
+        return wf
+
+    def _build_image_batch_chain(self, workflow, filenames, replace_node_id, start_id):
+        """Replace a single LoadImage node (replace_node_id) with N individual LoadImage
+        nodes chained together via ImageBatch, wiring the final output into all downstream
+        references that previously pointed at replace_node_id.
+        LoadImage nodes get IDs start_id, start_id+1, ...
+        ImageBatch nodes get IDs start_id+100, start_id+101, ..."""
+        import copy
+        wf = copy.deepcopy(workflow)
+        n = len(filenames)
+        batch_start = start_id + 1000  # far enough to never collide with other chains
+
+        # Create one LoadImage per file
+        for i, fname in enumerate(filenames):
+            wf[str(start_id + i)] = {'inputs': {'image': fname}, 'class_type': 'LoadImage'}
+
+        # Chain them with ImageBatch
+        if n == 1:
+            final_out = [str(start_id), 0]
+        else:
+            wf[str(batch_start)] = {
+                'inputs': {'image1': [str(start_id), 0], 'image2': [str(start_id + 1), 0]},
+                'class_type': 'ImageBatch'
+            }
+            for i in range(2, n):
+                wf[str(batch_start + i - 1)] = {
+                    'inputs': {
+                        'image1': [str(batch_start + i - 2), 0],
+                        'image2': [str(start_id + i), 0]
+                    },
+                    'class_type': 'ImageBatch'
+                }
+            final_out = [str(batch_start + n - 2), 0]
+
+        # Rewire all downstream references from replace_node_id to the chain output
+        for node in wf.values():
+            for key, val in node.get('inputs', {}).items():
+                if isinstance(val, list) and len(val) == 2 and str(val[0]) == str(replace_node_id):
+                    node['inputs'][key] = list(final_out)
+
+        # Remove the original placeholder node
+        wf.pop(str(replace_node_id), None)
+        print(f"  Built ImageBatch chain: {n} files → node {replace_node_id} replaced (LoadImage IDs {start_id}–{start_id+n-1})", flush=True)
+        return wf
+
     def _handle_comfyui_batch(self):
         content_length = int(self.headers.get('Content-Length', 0))
         body = json.loads(self.rfile.read(content_length))
 
-        images_b64 = body.get('images', [])
-        original_filename = body.get('original_filename')  # pre-uploaded by /upload_original
-        mask_filename = body.get('mask_filename')          # pre-uploaded mask by /upload_original
-        comfyui_url = body.get('comfyui_url', 'http://localhost:8188').rstrip('/')
-        api_key = body.get('api_key', '')
-        custom_workflow = body.get('workflow')
-        print(f"  Batch: {len(images_b64)} crops + original={'yes (' + original_filename + ')' if original_filename else 'no'} + mask={'yes (' + mask_filename + ')' if mask_filename else 'no'}, key={'SET' if api_key else 'EMPTY'}", flush=True)
+        images_b64       = body.get('images', [])
+        icon_masks_b64   = body.get('icon_masks', [])      # per-icon mask crops from browser
+        bg_filename      = body.get('original_filename')   # BG image, pre-uploaded → node 1771
+        bg_mask_filename = body.get('mask_filename')       # BG mask, pre-uploaded → node 1793
+        style_string     = body.get('style_string', '')    # style for both pipelines
+        comfyui_url      = body.get('comfyui_url', 'http://localhost:8188').rstrip('/')
+        api_key          = body.get('api_key', '')
+        custom_workflow  = body.get('workflow')
+        print(f"  Batch: {len(images_b64)} icons | bg={'yes' if bg_filename else 'no'} | "
+              f"bg_mask={'yes' if bg_mask_filename else 'no'} | style='{style_string}'", flush=True)
 
         auth_headers = {}
         if api_key:
@@ -437,25 +559,56 @@ class Handler(http.server.BaseHTTPRequestHandler):
         headers = {**auth_headers, 'Content-Type': 'application/json'}
 
         try:
-            # Upload all icon crops
-            filenames = []
-            for i, b64_data in enumerate(images_b64):
-                if ',' in b64_data:
-                    b64_data = b64_data.split(',', 1)[1]
-                img_bytes = base64.b64decode(b64_data)
-                fname = self._upload_image(comfyui_url, auth_headers, img_bytes, f'crop_{i}.png')
-                filenames.append(fname)
-                print(f"  Uploaded [{i+1}/{len(images_b64)}]: {fname}", flush=True)
+            icon_filenames = []
+            mask_filenames = []
 
-            workflow = self._build_batch_workflow(filenames, custom_workflow, original_filename, mask_filename)
+            # Upload each icon + a matching white mask individually
+            for i, b64 in enumerate(images_b64):
+                if ',' in b64:
+                    b64 = b64.split(',', 1)[1]
+                img_bytes = base64.b64decode(b64)
 
-            # Submit
-            prompt_payload = json.dumps({"prompt": workflow}).encode()
+                arr = np.frombuffer(img_bytes, np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is None:
+                    print(f"  Skipping icon {i+1}: could not decode", flush=True)
+                    continue
+                h, w = img.shape[:2]
+
+                # Use browser-provided mask crop if available, else fall back to solid white
+                if i < len(icon_masks_b64) and icon_masks_b64[i]:
+                    m64 = icon_masks_b64[i]
+                    if ',' in m64:
+                        m64 = m64.split(',', 1)[1]
+                    mask_bytes = base64.b64decode(m64)
+                else:
+                    _, mask_enc = cv2.imencode('.png', np.full((h, w, 3), 255, dtype=np.uint8))
+                    mask_bytes = mask_enc.tobytes()
+
+                icon_fname = self._upload_image(comfyui_url, auth_headers, img_bytes,  f'icon_{i}.png')
+                mask_fname = self._upload_image(comfyui_url, auth_headers, mask_bytes, f'icon_mask_{i}.png')
+                icon_filenames.append(icon_fname)
+                mask_filenames.append(mask_fname)
+                print(f"  [{i+1}/{len(images_b64)}] icon={icon_fname}  mask={mask_fname}", flush=True)
+
+            # Build workflow: inject fixed inputs (BG, style, count) then wire icon/mask chains
+            workflow = self._inject_workflow_inputs(
+                BASE_WORKFLOW,
+                bg_filename=bg_filename,
+                bg_mask_filename=bg_mask_filename,
+                style_string=style_string,
+                icon_count=len(icon_filenames),
+                custom_workflow=custom_workflow,
+            )
+
+            # Replace nodes 1766 and 1936 with ImageBatch chains (one LoadImage per file)
+            workflow = self._build_image_batch_chain(workflow, icon_filenames, '1766', start_id=10)
+            workflow = self._build_image_batch_chain(workflow, mask_filenames, '1936', start_id=110)
+
+            prompt_payload = json.dumps({'prompt': workflow}).encode()
             req = urllib.request.Request(
                 comfyui_url + '/api/prompt',
-                data=prompt_payload,
-                headers=headers,
-                method='POST'
+                data=prompt_payload, headers=headers, method='POST'
             )
             try:
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -730,6 +883,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         completed = False
         output_images = []  # collected from 'executed' WS messages
+        last_activity = time.time()
+        IDLE_TIMEOUT = 30  # return what we have after 30s of silence
         try:
             ws_headers = {}
             if api_key:
@@ -742,11 +897,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             )
             deadline = time.time() + timeout
             while time.time() < deadline:
+                # If we have results and nothing came in for IDLE_TIMEOUT seconds, give up waiting
+                if output_images and (time.time() - last_activity) > IDLE_TIMEOUT:
+                    print(f"  WS idle {IDLE_TIMEOUT}s with {len(output_images)} result(s) — returning early", flush=True)
+                    completed = True
+                    break
                 ws.settimeout(min(5, deadline - time.time()))
                 try:
                     raw = ws.recv()
                 except websocket.WebSocketTimeoutException:
                     continue
+                last_activity = time.time()
                 # Binary frames (preview images) — skip
                 if isinstance(raw, bytes):
                     continue
@@ -756,51 +917,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     continue
                 mtype = data.get('type', '')
                 d = data.get('data') or {}
+                # Log all messages for our prompt for visibility
+                if d.get('prompt_id') == prompt_id or mtype in ('status',):
+                    print(f"  WS [{mtype}] node={d.get('node')} err={d.get('exception_message','')[:80] if mtype=='execution_error' else ''}", flush=True)
                 if mtype == 'executed' and d.get('prompt_id') == prompt_id:
-                    # Collect output image metadata from SaveImage nodes
                     output = d.get('output') or {}
                     node_id = d.get('node')
                     for img_info in output.get('images', []):
                         if img_info.get('type') != 'temp':
                             output_images.append({**img_info, 'node_id': node_id})
                             print(f"  WS executed node {node_id}: {img_info.get('filename')}", flush=True)
-                elif mtype in ('executing', 'execution_success') and d.get('prompt_id') == prompt_id:
-                    is_done = (mtype == 'execution_success' or d.get('node') is None)
-                    if is_done and not completed:
-                        print(f"  WS: {mtype} for {prompt_id} — draining remaining messages", flush=True)
-                        completed = True
-                        # Drain for up to 5s to collect any remaining 'executed' messages
-                        drain_deadline = time.time() + 5
-                        ws.settimeout(1)
-                        while time.time() < drain_deadline:
-                            try:
-                                drain_raw = ws.recv()
-                                if isinstance(drain_raw, bytes):
-                                    continue
-                                drain_data = json.loads(drain_raw)
-                                if drain_data.get('type') == 'executed':
-                                    dd = drain_data.get('data') or {}
-                                    if dd.get('prompt_id') == prompt_id:
-                                        out = dd.get('output') or {}
-                                        dn = dd.get('node')
-                                        for img_info in out.get('images', []):
-                                            if img_info.get('type') != 'temp':
-                                                output_images.append({**img_info, 'node_id': dn})
-                                                print(f"  WS drain node {dn}: {img_info.get('filename')}", flush=True)
-                            except Exception:
-                                break
-                        break
+                elif mtype == 'execution_success' and d.get('prompt_id') == prompt_id:
+                    print(f"  WS: execution_success — draining 5s for any remaining outputs", flush=True)
+                    completed = True
+                    drain_deadline = time.time() + 5
+                    ws.settimeout(1)
+                    while time.time() < drain_deadline:
+                        try:
+                            drain_raw = ws.recv()
+                            if isinstance(drain_raw, bytes):
+                                continue
+                            drain_data = json.loads(drain_raw)
+                            if drain_data.get('type') == 'executed':
+                                dd = drain_data.get('data') or {}
+                                if dd.get('prompt_id') == prompt_id:
+                                    out = dd.get('output') or {}
+                                    dn = dd.get('node')
+                                    for img_info in out.get('images', []):
+                                        if img_info.get('type') != 'temp':
+                                            output_images.append({**img_info, 'node_id': dn})
+                                            print(f"  WS drain node {dn}: {img_info.get('filename')}", flush=True)
+                        except Exception:
+                            break
+                    break
                 elif mtype == 'execution_error' and d.get('prompt_id') == prompt_id:
-                    raise ValueError(f"ComfyUI error: {d.get('exception_message', 'unknown')}")
+                    node_id = d.get('node', '?')
+                    msg = d.get('exception_message', 'unknown')
+                    print(f"  WS execution_error node {node_id}: {msg}", flush=True)
+                    if not output_images:
+                        raise ValueError(f"ComfyUI node {node_id} error: {msg}")
+                    # Partial results — return what we have
+                    completed = True
+                    break
             ws.close()
         except Exception as e:
             print(f"  WS error: {e}", flush=True)
             if not completed and not output_images:
-                return []
+                return [], []
 
-        if not completed and not output_images:
-            print(f"  WS timed out with no results", flush=True)
-            return []
+        if not output_images:
+            print(f"  WS finished with no results", flush=True)
+            return [], []
 
         # Fetch each output image via /api/view
         images = []

@@ -261,6 +261,8 @@ def generate_html(data, image_name="uploaded image"):
     <input type="text" id="comfyUrl" value="https://cloud.comfy.org">
     <label>API Key:</label>
     <input type="password" id="comfyApiKey" placeholder="comfyui-..." style="width:180px;">
+    <label>Style:</label>
+    <input type="text" id="styleString" placeholder="e.g. watercolour, pixel art" style="width:180px;">
     <button onclick="removeAllBg()" style="color:#a5d6a7;">Remove All BG</button>
     <button onclick="sendAllToComfyUI()">Send All &rarr; ComfyUI</button>
     <button onclick="toggleSelectAll()" id="selectAllBtn" style="color:#ffa657;">Select All</button>
@@ -1013,6 +1015,37 @@ async function sendBatchToComfyUI() {{
     return item._rgbaB64 || c.toDataURL('image/png');
   }});
 
+  // Build per-icon mask crops at original resolution from the B&W mask canvas
+  const maskCanvasEl = (function() {{
+    const mc = document.createElement('canvas');
+    mc.width = DATA.width; mc.height = DATA.height;
+    const mctx = mc.getContext('2d');
+    mctx.fillStyle = '#ffffff';
+    mctx.fillRect(0, 0, mc.width, mc.height);
+    mctx.fillStyle = '#000000';
+    for (const g of _currentGroups) {{
+      for (const c of g.members) {{
+        if (c.points.length < 3) continue;
+        mctx.beginPath();
+        mctx.moveTo(c.points[0][0], c.points[0][1]);
+        for (let i = 1; i < c.points.length; i++) mctx.lineTo(c.points[i][0], c.points[i][1]);
+        mctx.closePath();
+        mctx.fill();
+      }}
+    }}
+    return mc;
+  }})();
+  const maskCtxEl = maskCanvasEl.getContext('2d');
+
+  const iconMasks = items.map(item => {{
+    const g = item._group;
+    if (!g || g.w < 1 || g.h < 1) return '';
+    const mc = document.createElement('canvas');
+    mc.width = g.w; mc.height = g.h;
+    mc.getContext('2d').putImageData(maskCtxEl.getImageData(g.x, g.y, g.w, g.h), 0, 0);
+    return mc.toDataURL('image/png');
+  }});
+
   try {{
     // Step 1: upload original screenshot separately (avoids huge JSON payload)
     const origResp = await fetch('/upload_original', {{
@@ -1024,9 +1057,9 @@ async function sendBatchToComfyUI() {{
     if (origData.error) throw new Error('Original upload: ' + origData.error);
     const originalFilename = origData.filename;
 
-    // Step 2: upload B&W mask from contour solid fill
+    // Step 2: upload B&W mask from contour solid fill (full image — node 1793 BG mask)
     statusEl.textContent = 'Uploading mask\u2026';
-    const maskB64 = generateMaskCanvas();
+    const maskB64 = maskCanvasEl.toDataURL('image/png');
     const maskResp = await fetch('/upload_original', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
@@ -1038,11 +1071,13 @@ async function sendBatchToComfyUI() {{
 
     statusEl.textContent = 'Uploading ' + items.length + ' crops\u2026';
 
-    // Step 3: send batch with original_filename and mask_filename references
+    // Step 3: send batch — images + per-icon mask crops + BG filenames
     const resp = await fetch('/comfyui_batch', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{images, original_filename: originalFilename, mask_filename: maskFilename, comfyui_url: comfyUrl, api_key: apiKey, workflow: _customWorkflow}})
+      body: JSON.stringify({{images, icon_masks: iconMasks, original_filename: originalFilename, mask_filename: maskFilename,
+        style_string: document.getElementById('styleString').value.trim(),
+        comfyui_url: comfyUrl, api_key: apiKey, workflow: _customWorkflow}})
     }});
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
@@ -1089,7 +1124,7 @@ function compositeResultsOnCanvas(images, groups) {{
 
 function applyComfyResultsToCanvas(images, nodeIds, groups) {{
   // Separate background from icon images by node ID
-  const bgB64 = images[nodeIds.indexOf('1806')] || null;
+  const bgB64 = images[nodeIds.indexOf('1938')] || null;
   const iconImgs = images.filter((_, i) => nodeIds[i] === '1767');
   // Icon crops align to the groups in order
   const iconGroups = groups.slice(0, iconImgs.length);
@@ -1202,7 +1237,7 @@ async function pollHistory(comfyuiUrl, promptId, statusEl) {{
   throw new Error('Timed out waiting for ComfyUI result');
 }}
 
-const NODE_LABELS = {{'1767': 'Icons', '1806': 'Background', '1823': 'Environment'}};
+const NODE_LABELS = {{'1767': 'Icons', '1938': 'Background'}};
 
 function showComfyResults(images, nodeIds) {{
   if (!images || images.length === 0) return;
